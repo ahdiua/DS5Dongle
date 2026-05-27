@@ -17,6 +17,7 @@
 #include "classic/sdp_server.h"
 #include "config.h"
 #include "state_mgr.h"
+#include "wake.h"
 #include "pico/util/queue.h"
 
 #define MTU_CONTROL 672
@@ -463,6 +464,8 @@ static void l2cap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
 
                     const auto mtu = l2cap_get_remote_mtu_for_local_cid(hid_interrupt_cid);
                     printf("[L2CAP] Remote Interrupt MTU: %d\n",mtu);
+
+                    wake_on_bt_connect();
 
                     gap_connectable_control(false);
                     gap_discoverable_control(false);
