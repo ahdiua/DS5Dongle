@@ -600,12 +600,17 @@ void __not_in_flash_func(bt_write)(const uint8_t *data, const uint16_t len) {
 vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
     // 若为0x81则会请求新内容，其他若有旧数据则不进行请求
     auto ret = vector<uint8_t>{};
-    if (feature_data.contains(reportId)) {
+    const bool has_cached_report = feature_data.contains(reportId);
+    if (has_cached_report) {
         ret = feature_data[reportId];
     }
-    if (!feature_data.contains(reportId) ||
+    const bool use_pico_cmd_response =
+        reportId == 0x81 &&
+        ret.size() >= 2 &&
+        ret[0] == 0x66;
+    if (!has_cached_report ||
         // Get Test Command Result
-        reportId == 0x81 ||
+        (reportId == 0x81 && !use_pico_cmd_response) ||
         // DSE: Set Profile Save?
         reportId == 0x63 ||
         reportId == 0x65 ||
@@ -621,6 +626,9 @@ vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
             printf("[L2CAP] Requesting Get Feature Report 0x%02X\n", reportId);
 #endif
         }
+    }
+    if (use_pico_cmd_response) {
+        feature_data.erase(reportId);
     }
     return ret;
 }
