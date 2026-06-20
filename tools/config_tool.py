@@ -36,6 +36,8 @@ def _load_hid():
 
 VID = 0x054C
 PIDS = (0x0CE6, 0x0DF2)  # DualSense, DualSense Edge
+HID_USAGE_PAGE_GENERIC_DESKTOP = 0x01
+HID_USAGE_GAMEPAD = 0x05
 
 REPORT_SET = 0xF6        # SET_REPORT: write/save config
 REPORT_GET_CONFIG = 0xF7  # GET_REPORT: read Config_body
@@ -80,14 +82,41 @@ STRUCT_FMT = "<" + "".join(KIND_TO_CODE[f[1]] for f in FIELDS)
 BODY_SIZE = struct.calcsize(STRUCT_FMT)
 
 
+def is_gamepad_hid(devinfo):
+    return (devinfo.get("usage_page") == HID_USAGE_PAGE_GENERIC_DESKTOP and
+            devinfo.get("usage") == HID_USAGE_GAMEPAD)
+
+
+def fmt_hex(value):
+    if value is None:
+        return "?"
+    return f"0x{int(value):04X}"
+
+
+def describe_hid(devinfo):
+    return (
+        f"pid={fmt_hex(devinfo.get('product_id'))}, "
+        f"interface={devinfo.get('interface_number', '?')}, "
+        f"usage_page={fmt_hex(devinfo.get('usage_page'))}, "
+        f"usage={fmt_hex(devinfo.get('usage'))}, "
+        f"product={devinfo.get('product_string') or '?'}"
+    )
+
+
 def open_device():
     hid = _load_hid()
     cand = [d for d in hid.enumerate(VID) if d["product_id"] in PIDS]
     if not cand:
         sys.exit("No DualSense / ds5dongle found (VID 054C, PID 0CE6/0DF2). "
                  "Close Steam/DSX if they're holding the device.")
+    gamepads = [d for d in cand if is_gamepad_hid(d)]
+    if not gamepads:
+        detail = "\n".join(f"  {describe_hid(d)}" for d in cand)
+        sys.exit("Found DualSense / ds5dongle HID device(s), but none were the Game Pad interface "
+                 "(usage_page=0x0001, usage=0x0005). Wake adds a keyboard HID; "
+                 "this tool only opens the gamepad.\n" + detail)
     dev = hid.device()
-    dev.open_path(cand[0]["path"])
+    dev.open_path(gamepads[0]["path"])
     return dev
 
 
