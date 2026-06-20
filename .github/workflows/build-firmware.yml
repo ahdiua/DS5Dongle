@@ -298,11 +298,13 @@ jobs:
 
     steps:
       - name: Download UF2 artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: ds5-bridge*
           path: artifacts
           merge-multiple: true
+          # UF2s are uploaded with archive:false, so download them as raw files.
+          skip-decompress: true
 
       - name: Remove debug firmware before release upload
         run: |
