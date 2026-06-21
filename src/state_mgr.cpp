@@ -107,11 +107,11 @@ void state_update(const uint8_t *data, const uint8_t size) {
         state.RumbleEmulationLeft = state.RumbleEmulationRight = 0;
     }
 
-    if (update.AllowHeadphoneVolume) {
+    if (!get_config().lock_volume && update.AllowHeadphoneVolume) {
         get_config().headset_volume = update.VolumeHeadphones;
         state.VolumeHeadphones = update.VolumeHeadphones;
     }
-    if (update.AllowSpeakerVolume) {
+    if (!get_config().lock_volume && update.AllowSpeakerVolume) {
         get_config().speaker_volume = update.VolumeSpeaker;
         state.VolumeSpeaker = update.VolumeSpeaker;
     }

@@ -65,7 +65,7 @@ FIELDS = [
     ("speaker_volume",     "u8",    lambda v: 0 <= v <= 127,     "[0, 127]"),
     ("headset_volume",     "u8",    lambda v: 0 <= v <= 127,     "[0, 127]"),
     ("speaker_gain",       "u8",    lambda v: 0 <= v <= 7,       "[0, 7]"),
-    ("inactive_time",      "u8",    lambda v: 0 <= v <= 60, "[0, 60] minutes (0 disable)"),
+    ("inactive_time",      "u8",    lambda v: 0 <= v <= 60,      "[0, 60] minutes (0 disable)"),
     ("disable_pico_led",   "u8",    lambda v: v in (0, 1),       "0/1"),
     ("polling_rate_mode",  "u8",    lambda v: v in (0, 1, 2),    "0:250Hz 1:500Hz 2:real-time"),
     ("audio_buffer_length","u8",    lambda v: 16 <= v <= 128,    "[16, 128]"),
@@ -75,7 +75,8 @@ FIELDS = [
     ("disable_mic",        "u8",    lambda v: v in (0, 1),       "0/1 (disable controller mic)"),
     ("disable_speaker",    "u8",    lambda v: v in (0, 1),       "0/1 (disable speaker/headset)"),
     ("enable_wake",        "u8",    lambda v: v in (0, 1),       "0/1 (wake host on PS press)"),
-    ("trigger_reduce",     "u8",    lambda v: 0 <= v <= 10,       "[0, 10] (0: auto)"),
+    ("trigger_reduce",     "u8",    lambda v: 0 <= v <= 10,      "[0, 10] (0: auto)"),
+    ("lock_volume",        "u8",    lambda v: v in (0, 1),       "0/1 (ignore the volume change from SetStateData(game or software))"),
 ]
 FIELD_NAMES = [f[0] for f in FIELDS]
 # Little-endian, no padding -- matches __attribute__((packed)) Config_body.
