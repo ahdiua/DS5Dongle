@@ -18,18 +18,16 @@
 #include "opus.h"
 #include "utils.h"
 #include "pico/multicore.h"
-#include "pico/platform.h"
 #include "pico/flash.h"
 #include "pico/util/queue.h"
 #include "config.h"
-#include "state_mgr.h"
-#include "usb.h"
 
 #define INPUT_CHANNELS    4
 #define OUTPUT_CHANNELS   2
 #define SAMPLE_SIZE       64
-#define REPORT_SIZE       398
-#define REPORT_ID         0x36
+#define SPEAKER_OPUS_SIZE 200
+#define REPORT_SIZE       547
+#define REPORT_ID         0x39
 // #define VOLUME_GAIN       2
 // #define BUFFER_LENGTH     48
 #define MIC_CHANNELS      1
@@ -40,26 +38,36 @@ using std::clamp;
 using std::max;
 
 static WDL_Resampler resampler;
-static uint8_t reportSeqCounter = 0;
-static uint8_t packetCounter = 0;
+extern uint8_t reportSeqCounter;
+extern uint8_t packetCounter;
 static bool plug_headset = false;
 static bool mic_active = false; // host has opened the mic IN interface (alt != 0)
 alignas(8) static uint32_t audio_core1_stack[8192];
-queue_t audio_fifo;
+queue_t audio_fifo; // raw pcm data
 queue_t mic_fifo;
 queue_t mic_decode_fifo;
-static uint8_t opus_buf[200];
-critical_section_t opus_cs;
+queue_t audio_spk_fifo; // opus data
+queue_t haptics_fifo;
 
 struct audio_raw_element {
     float data[512 * 2];
 };
+
 struct mic_element {
     uint8_t data[MIC_OPUS_SIZE];
 };
+
 struct mic_decode_element {
     int16_t data[MIC_FRAMES * MIC_CHANNELS];
     uint16_t len;
+};
+
+struct audio_spk_element {
+    uint8_t data[SPEAKER_OPUS_SIZE];
+};
+
+struct haptics_element {
+    uint8_t data[64];
 };
 
 void set_headset(bool state) {
@@ -92,7 +100,76 @@ void update_mic_status() {
     pkt[8] = buf_len;
     pkt[9] = buf_len;
     pkt[10] = packetCounter++;
-    bt_write(pkt,sizeof(pkt));
+    bt_write(pkt, sizeof(pkt));
+}
+
+void __not_in_flash_func(audio_bt_task)() {
+    const Config_body &cfg = get_config();
+    const bool mic_enabled = mic_active && !cfg.disable_mic;
+#if DISABLE_SPEAKER_PROC
+    const bool speaker_enabled = false;
+#else
+    const bool speaker_enabled = !cfg.disable_speaker;
+#endif
+
+    if (queue_get_level(&haptics_fifo) < 2) {
+        return;
+    }
+#if !DISABLE_SPEAKER_PROC
+    if (speaker_enabled && queue_get_level(&audio_spk_fifo) < 2) {
+        return;
+    }
+#endif
+
+    uint8_t pkt[REPORT_SIZE]{};
+    pkt[0] = REPORT_ID;
+    pkt[1] = reportSeqCounter << 4;
+    reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
+    pkt[2] = 0x11 | 0 << 6 | 1 << 7;
+    pkt[3] = 7;
+    pkt[4] = mic_enabled ? 0b01111111 : 0b01111110;
+    const auto buf_len = cfg.audio_buffer_length;
+    pkt[5] = 0x51; // VolumeHeadphones
+    pkt[6] = 0x1f; // VolumeMic
+    pkt[7] = 0x62; // VolumeSpeaker
+    pkt[8] = buf_len; // AudioBufferLength
+    pkt[9] = buf_len;
+    pkt[10] = packetCounter += 2;
+    pkt[11] = 0x12 | 1 << 6 | 1 << 7;
+    pkt[12] = SAMPLE_SIZE;
+    static haptics_element haptics_pb{};
+    if (queue_get_level(&haptics_fifo) >= 2) {
+        if (queue_try_remove(&haptics_fifo, &haptics_pb)) {
+            memcpy(pkt + 13, haptics_pb.data,SAMPLE_SIZE);
+        } else {
+            printf("[Audio] Warning: Haptics queue remove failed\n");
+        }
+        if (queue_try_remove(&haptics_fifo, &haptics_pb)) {
+            memcpy(pkt + 13 + SAMPLE_SIZE, haptics_pb.data,SAMPLE_SIZE);
+        } else {
+            printf("[Audio] Warning: Haptics queue remove failed\n");
+        }
+    }
+#if !DISABLE_SPEAKER_PROC
+    if (speaker_enabled) {
+        pkt[141] = (plug_headset ? 0x16 : 0x13) | 1 << 6 | 1 << 7;
+        pkt[142] = SPEAKER_OPUS_SIZE;
+        static audio_spk_element spk_pb{};
+        if (queue_get_level(&audio_spk_fifo) >= 2) {
+            if (queue_try_remove(&audio_spk_fifo, &spk_pb)) {
+                memcpy(pkt + 143, spk_pb.data,SPEAKER_OPUS_SIZE);
+            } else {
+                printf("[Audio] Warning: Speaker queue remove failed\n");
+            }
+            if (queue_try_remove(&audio_spk_fifo, &spk_pb)) {
+                memcpy(pkt + 143 + SPEAKER_OPUS_SIZE, spk_pb.data,SPEAKER_OPUS_SIZE);
+            } else {
+                printf("[Audio] Warning: Speaker queue remove failed\n");
+            }
+        }
+    }
+#endif
+    bt_write(pkt, sizeof(pkt));
 }
 
 void __not_in_flash_func(audio_loop)() {
@@ -127,6 +204,8 @@ void __not_in_flash_func(audio_loop)() {
         }
     }
 
+    audio_bt_task();
+
     // 1. 读取 USB 音频数据
     if (!tud_audio_available()) return;
 
@@ -147,7 +226,8 @@ void __not_in_flash_func(audio_loop)() {
 #if !DISABLE_SPEAKER_PROC
     if (!speaker_enabled) {
         audio_buf_pos = 0;
-        while (queue_try_remove(&audio_fifo, NULL)) {}
+        while (queue_try_remove(&audio_fifo, NULL)) {
+        }
     }
 #endif
     for (int i = 0; i < nframes; i++) {
@@ -192,50 +272,14 @@ void __not_in_flash_func(audio_loop)() {
         if (haptic_buf_pos != SAMPLE_SIZE) {
             continue;
         }
-        uint8_t pkt[REPORT_SIZE]{};
-        pkt[0] = REPORT_ID;
-        pkt[1] = reportSeqCounter << 4;
-        reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
-        pkt[2] = 0x11 | 0 << 6 | 1 << 7;
-        pkt[3] = 7;
-        // bit0 enables controller mic streaming. Gate it on the host actually
-        // opening the mic IN interface (set_mic_active from tud_audio_set_itf_cb)
-        // AND on the user not disabling the mic (config.disable_mic), so the
-        // DualSense only streams mic audio -- and core1 only decodes it -- while
-        // an app is recording. Other bits (speaker/haptics) stay enabled.
-        pkt[4] = mic_enabled ? 0b11111111 : 0b11111110;
-        const auto buf_len = cfg.audio_buffer_length;
-        pkt[5] = buf_len;
-        pkt[6] = buf_len;
-        pkt[7] = buf_len;
-        pkt[8] = buf_len; // 这 4 个字节的作用未知，调整没有效果
-        pkt[9] = buf_len; // audio buffer length 只有调整这个字节生效。
-        pkt[10] = packetCounter++;
-        // SetStateData
-        pkt[11] = 0x10 | 0 << 6 | 1 << 7;
-        pkt[12] = 63;
-        state_set(pkt + 13,63);
-        // Haptics Audio Data
-        pkt[76] = 0x12 | 0 << 6 | 1 << 7;
-        pkt[77] = SAMPLE_SIZE;
-        memcpy(pkt + 78, haptic_buf, SAMPLE_SIZE);
-#if !DISABLE_SPEAKER_PROC
-        // Speaker Audio Data -- omitted entirely when the user disables the
-        // speaker/headset (config.disable_speaker), so the controller's speaker
-        // amp isn't driven (mirrors the Pico W no-speaker report).
-        if (speaker_enabled) {
-            pkt[142] = (plug_headset ? 0x16 : 0x13) | 0 << 6 | 1 << 7; // Speaker: 0x13
-            // L Headset Mono: 0x14
-            // L Headset R Speaker: 0x15
-            // Headset: 0x16
-            pkt[143] = 200;
-            critical_section_enter_blocking(&opus_cs);
-            memcpy(pkt + 144, opus_buf, 200);
-            critical_section_exit(&opus_cs);
+        static haptics_element element{};
+        memcpy(element.data, haptic_buf,SAMPLE_SIZE);
+        if (queue_is_full(&haptics_fifo)) {
+            queue_try_remove(&haptics_fifo, NULL);
         }
-#endif
-
-        bt_write(pkt, sizeof(pkt));
+        if (!queue_try_add(&haptics_fifo, &element)) {
+            printf("[Audio] Warning: haptics_fifo add failed\n");
+        }
         haptic_buf_pos = 0;
     }
 }
@@ -245,13 +289,14 @@ void audio_init() {
     resampler.SetRates(48000, 3000);
     resampler.SetFeedMode(true);
     resampler.Prealloc(2, 48, 4);
+    queue_init(&haptics_fifo, sizeof(haptics_element), 2);
     // Mic queues are read from audio_loop on core0 every iteration, so they
     // must exist regardless of the speaker-proc build flag.
     queue_init(&mic_fifo, sizeof(mic_element), 2);
     queue_init(&mic_decode_fifo, sizeof(mic_decode_element), 2);
 #if !DISABLE_SPEAKER_PROC
     queue_init(&audio_fifo, sizeof(audio_raw_element), 2);
-    critical_section_init(&opus_cs);
+    queue_init(&audio_spk_fifo, sizeof(audio_spk_element), 2);
     multicore_launch_core1_with_stack(core1_entry, audio_core1_stack, sizeof(audio_core1_stack));
 #endif
 }
@@ -280,7 +325,7 @@ static void __not_in_flash_func(speaker_proc)() {
     static WDL_ResampleSample out_buf[480 * 2];
     resampler_audio.ResampleOut(out_buf, nframes, 480, 2);
 
-    static uint8_t out[200];
+    static uint8_t out[SPEAKER_OPUS_SIZE];
     const int encoded_len = opus_encode_float(encoder, out_buf, 480, out, sizeof(out));
     if (encoded_len <= 0) {
 #if ENABLE_VERBOSE
@@ -288,12 +333,18 @@ static void __not_in_flash_func(speaker_proc)() {
 #endif
         return;
     }
-    critical_section_enter_blocking(&opus_cs);
-    memcpy(opus_buf, out, encoded_len);
-    if (encoded_len < (int) sizeof(opus_buf)) {
-        memset(opus_buf + encoded_len, 0, sizeof(opus_buf) - encoded_len);
+
+    static audio_spk_element spk_ele{};
+    memcpy(spk_ele.data, out, encoded_len);
+    if (encoded_len < (int) sizeof(spk_ele.data)) {
+        memset(spk_ele.data + encoded_len, 0, sizeof(spk_ele.data) - encoded_len);
     }
-    critical_section_exit(&opus_cs);
+    if (queue_is_full(&audio_spk_fifo)) {
+        queue_try_remove(&audio_spk_fifo, NULL);
+    }
+    if (!queue_try_add(&audio_spk_fifo, &spk_ele)) {
+        printf("[Audio] Warning: audio_spk_fifo add failed\n");
+    }
 }
 
 // Mic path: opus packets from the controller (core0 mic_fifo) -> opus decode ->

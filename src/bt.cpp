@@ -17,17 +17,12 @@
 #include "bsp/board_api.h"
 #include "classic/sdp_server.h"
 #include "config.h"
-#include "state_mgr.h"
 #include "dse.h"
 #include "wake.h"
 #include "pico/util/queue.h"
 #if ENABLE_BATT_LED
 #include "battery_led.h"
 #endif
-#include "hardware/sync.h"
-#include "hardware/structs/ioqspi.h"
-#include "hardware/structs/sio.h"
-#include "pico/flash.h"
 #if PICO_RP2350
 #include "hardware/regs/sio.h"
 #endif
@@ -77,7 +72,7 @@ unordered_map<uint8_t, vector<uint8_t> > feature_data;
 queue_t send_fifo;
 
 struct send_element {
-    uint8_t data[512];
+    uint8_t data[672];
     size_t len;
 };
 
@@ -731,15 +726,6 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                     printf("Init DualSense\n");
 
                     init_feature();
-                    // 初始化手柄状态
-                    state_init();
-                    uint8_t report32[142]{};
-                    report32[0] = 0x32;
-                    report32[1] = 0x10; // reportSeqCounter
-                    report32[2] = 0x10 | 0 << 6 | 1 << 7;
-                    report32[3] = 0x3f; // 63 bytes
-                    state_set(report32 + 4,sizeof(SetStateData));
-                    bt_write(report32, sizeof(report32));
 
                     const auto mtu = l2cap_get_remote_mtu_for_local_cid(hid_interrupt_cid);
                     printf("[L2CAP] Remote Interrupt MTU: %d\n",mtu);
@@ -848,7 +834,7 @@ vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
     }
     if (!has_cached_report ||
         // Get Test Command Result
-        reportId == 0x81 ||
+        // reportId == 0x81 ||
         // DSE: Set Profile Save?
         reportId == 0x63 ||
         reportId == 0x65 ||

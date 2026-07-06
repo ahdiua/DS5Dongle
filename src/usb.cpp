@@ -8,10 +8,10 @@
 #include "tusb.h"
 #include "bsp/board_api.h"
 #include "config.h"
-#include "state_mgr.h"
+#include "utils.h"
 
-uint8_t mute[2]; // 0: SPEAKER(0x02) 1: MIC(0x05)
-float volume[2] = {-100.0f,0.0f}; // 0: SPEAKER(0x02) 1: MIC(0x05)
+uint8_t mute[2] = {}; // 0: SPEAKER(0x02) 1: MIC(0x05)
+float volume[2] = {0.0f,0.0f}; // 0: SPEAKER(0x02) 1: MIC(0x05)
 
 #define UAC1_ENTITY_SPK_FEATURE_UNIT    0x02
 #define UAC1_ENTITY_MIC_FEATURE_UNIT    0x05
@@ -51,14 +51,29 @@ static bool audio10_set_req_entity(tusb_control_request_t const *p_request, uint
         switch (ctrlSel) {
             case AUDIO10_FU_CTRL_MUTE:
                 switch (p_request->bRequest) {
-                    case AUDIO10_CS_REQ_SET_CUR:
+                    case AUDIO10_CS_REQ_SET_CUR: {
                         // Only 1st form is supported
                         TU_VERIFY(p_request->wLength == 1);
 
                         mute[index] = pBuff[0];
 
+                        /*uint8_t pkt[142]{};
+                        pkt[0] = 0x32;
+                        pkt[1] = 0x10;
+                        pkt[2] = 0x90;
+                        pkt[3] = 0x3f;
+                        SetStateData state = {
+                            .AllowAudioMute = 1,
+                            .MicMute = mute[1],
+                            .SpeakerMute = mute[0],
+                            .HeadphoneMute = mute[0],
+                        };
+                        memcpy(pkt + 4,&state,sizeof(state));
+                        bt_write(pkt,sizeof(pkt));*/
+
                         TU_LOG2("    Set Mute: %d of entity: %u\r\n", mute[index], entityID);
                         return true;
+                    }
 
                     default:
                         return false; // not supported
@@ -72,7 +87,32 @@ static bool audio10_set_req_entity(tusb_control_request_t const *p_request, uint
 
                         volume[index] = static_cast<float>(*reinterpret_cast<int16_t const *>(pBuff)) / 256;
                         if (entityID == UAC1_ENTITY_SPK_FEATURE_UNIT) {
-                            set_volume(100 + volume[index]); // volume[index]: [-100,0]
+                            /*uint8_t pkt[142]{};
+                            pkt[0] = 0x32;
+                            pkt[1] = 0x10;
+                            pkt[2] = 0x90;
+                            pkt[3] = 0x3f;
+                            SetStateData state = {
+                                .AllowHeadphoneVolume = 1,
+                                .AllowSpeakerVolume = 1,
+                                .VolumeHeadphones = static_cast<uint8_t>(100.0f + volume[index]),
+                                .VolumeSpeaker = static_cast<uint8_t>(100.0f + volume[index]),
+                            };
+                            memcpy(pkt + 4,&state,sizeof(state));
+                            bt_write(pkt,sizeof(pkt));*/
+                        }
+                        if (entityID == UAC1_ENTITY_MIC_FEATURE_UNIT) {
+                            /*uint8_t pkt[142]{};
+                            pkt[0] = 0x32;
+                            pkt[1] = 0x10;
+                            pkt[2] = 0x90;
+                            pkt[3] = 0x3f;
+                            SetStateData state = {
+                                .AllowMicVolume = 1,
+                                .VolumeMic = static_cast<uint8_t>(volume[index]),
+                            };
+                            memcpy(pkt + 4,&state,sizeof(state));
+                            bt_write(pkt,sizeof(pkt));*/
                         }
 
                         TU_LOG2("    Set Volume: %d dB of entity: %u\r\n", volume[index], entityID);
@@ -112,7 +152,7 @@ static bool audio10_get_req_entity(uint8_t rhport, tusb_control_request_t const 
                     case AUDIO10_CS_REQ_GET_CUR:
                         TU_LOG2("    Get Volume of entity: %u\r\n", entityID); {
                             if (entityID == UAC1_ENTITY_SPK_FEATURE_UNIT) {
-                                volume[index] = -std::min(static_cast<int>(get_config().speaker_volume),100);
+                                volume[index] = -100.0f + std::min(static_cast<int>(get_config().speaker_volume),100);
                             }
                             int16_t vol = volume[index] * 256; // convert to 1/256 dB units
                             return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &vol, sizeof(vol));

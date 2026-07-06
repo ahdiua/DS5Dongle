@@ -17,7 +17,6 @@
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
 #include "pico/cyw43_arch.h"
-#include "state_mgr.h"
 #if ENABLE_SERIAL
 #include "pico/stdio_usb.h"
 #endif
@@ -31,7 +30,7 @@
 // Pico SDK speciifically for waiting on conditions
 #include "pico/critical_section.h"
 
-int reportSeqCounter = 0;
+uint8_t reportSeqCounter = 0;
 uint8_t packetCounter = 0;
 bool spk_active = false;
 
@@ -220,21 +219,12 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     if (report_id == 0) {
         switch (buffer[0]) {
             case 0x02: {
-                state_update(buffer + 1, bufsize - 1);
-                bool send_now = ((buffer[1] >> 1) & 1) || // UseRumbleNotHaptics
-                                ((buffer[39] >> 3) & 1); // UseRumbleNotHaptics2
-                if (!send_now && spk_active) {
-                    break;
-                }
                 uint8_t outputData[78]{};
                 outputData[0] = 0x31;
                 outputData[1] = reportSeqCounter << 4;
-                if (++reportSeqCounter == 256) {
-                    reportSeqCounter = 0;
-                }
+                reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
                 outputData[2] = 0x10;
-                // memcpy(outputData + 3, buffer + 1, bufsize - 1);
-                state_set(outputData + 3, sizeof(SetStateData));
+                memcpy(outputData + 3, buffer + 1, bufsize - 1);
                 bt_write(outputData, sizeof(outputData));
                 break;
             }
@@ -245,7 +235,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
         report_id == 0x60 ||
         report_id == 0x62 ||
         report_id == 0x61) {
-        set_feature_data(report_id, const_cast<uint8_t *>(buffer), bufsize);
+        // set_feature_data(report_id, const_cast<uint8_t *>(buffer), bufsize);
     }
 }
 
@@ -308,7 +298,6 @@ int main() {
     bt_register_data_callback(on_bt_data);
 
     audio_init();
-    state_init();
 
 #if !ENABLE_SERIAL
     watchdog_enable(1000, true);
