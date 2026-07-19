@@ -7,7 +7,9 @@
 #include <cstdio>
 
 #include "bt.h"
+#include "usb_mode.h"
 #include "pico/time.h"
+#include "pico/cyw43_arch.h"
 #include "pico/flash.h"
 #include "hardware/gpio.h"
 #include "hardware/sync.h"
@@ -28,6 +30,12 @@ static int button_press_samples = 0;
 static int button_wait_samples = 0;
 static int button_click_count = 0;
 static uint32_t button_last_check_ms = 0;
+
+// Mode confirmation temporarily overrides the ordinary connection/battery LED:
+// one pulse = native DualSense, two pulses = XInput.
+static int mode_flash_toggles_remaining = 0;
+static bool mode_flash_led_state = false;
+static uint32_t mode_flash_last_toggle_ms = 0;
 
 // Read BOOTSEL by briefly floating the QSPI CSn line. Must run with both cores
 // in a known-safe state - if core 1 does an XIP read while CSn is floating it
@@ -77,16 +85,27 @@ static void button_dispatch(int clicks) {
         *((volatile uint32_t *) 0xe000ed0c) = 0x05fa0004; // SCB AIRCR: VECTKEY | SYSRESETREQ
         __dsb();
         while (true) { tight_loop_contents(); } // wait for the reset
-    } else {
+    } else if (clicks == 3) {
         // triple click -> reboot into BOOTSEL (USB mass storage) for reflashing.
         printf("[BTN] BOOTSEL triple click - reboot to BOOTSEL\n");
         reset_usb_boot(0, 0); // noreturn
+    } else if (clicks == 4) {
+        usb_gamepad_toggle_mode();
+        const int pulses = usb_xinput_mode() ? 2 : 1;
+        mode_flash_toggles_remaining = pulses * 2;
+        mode_flash_led_state = false;
+        mode_flash_last_toggle_ms = to_ms_since_boot(get_absolute_time());
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
+        printf("[BTN] BOOTSEL four clicks - %s mode\n",
+               usb_xinput_mode() ? "XInput" : "DualSense");
+    } else {
+        printf("[BTN] Ignoring unsupported BOOTSEL click count: %d\n", clicks);
     }
 }
 
-// Poll BOOTSEL at 10 Hz and dispatch single / double / triple click + hold:
+// Poll BOOTSEL at 10 Hz and dispatch click sequences + hold:
 //   - hold (>= HOLD_SAMPLES, ~1.5 s) -> clear all pairings
-//   - 1 click  -> pair / switch        2 clicks -> reboot        3 clicks -> BOOTSEL
+//   - 1 click -> pair/switch, 2 -> reboot, 3 -> BOOTSEL, 4 -> USB mode
 // Clicks are counted across the inter-click window; the action fires when it closes.
 // Also services the deferred blacklist persist on the same cadence.
 void button_check() {
@@ -142,4 +161,19 @@ void button_check() {
             }
             break;
     }
+}
+
+void button_feedback_tick() {
+    if (mode_flash_toggles_remaining <= 0) return;
+
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - mode_flash_last_toggle_ms >= 150) {
+        mode_flash_last_toggle_ms = now;
+        mode_flash_led_state = !mode_flash_led_state;
+        mode_flash_toggles_remaining--;
+    }
+    // The ordinary Bluetooth LED task runs immediately before this one. Write
+    // the feedback state every loop so a solid-connected LED cannot mask the
+    // off half of the pattern.
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, mode_flash_led_state);
 }

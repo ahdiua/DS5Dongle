@@ -6,6 +6,8 @@
 #include "bsp/board_api.h"
 #include "bt.h"
 #include "button_functions.h"
+#include "usb_mode.h"
+#include "xinput.h"
 #include "utils.h"
 #include "resample.h"
 #include "audio.h"
@@ -52,6 +54,10 @@ critical_section_t report_cs;
 volatile bool report_dirty = false;
 
 void __not_in_flash_func(interrupt_loop)() {
+    if (usb_xinput_mode()) {
+        xinput_task();
+        return;
+    }
     if (!tud_hid_ready()) return;
 
     // TODO: Refactor for better code reuse
@@ -100,6 +106,7 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
             }
             return;
         }
+        if (len < 66) return;
         if ((data[56] & 1) != (interrupt_in_data[53] & 1)) {
             set_headset(data[56] & 1);
         }
@@ -128,6 +135,15 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
         #ifdef ENABLE_WAKE_HID
         ps_shortcut_tick(data + 3, len - 3);
         #endif
+
+        if (usb_xinput_mode()) {
+            xinput_on_dualsense_report(data + 3, len - 3);
+            memcpy(interrupt_in_data, data + 3, sizeof(interrupt_in_data));
+#if ENABLE_BATT_LED
+            battery_led_note_report();
+#endif
+            return;
+        }
 
         if (get_config().polling_rate_mode != 2) {
             memcpy(interrupt_in_data, data + 3, 63);
@@ -363,6 +379,7 @@ int main() {
 #endif
         button_check();
         bt_inquiring_led();
+        button_feedback_tick();
         dse_task();
     }
 }

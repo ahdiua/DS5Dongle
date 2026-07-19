@@ -3,6 +3,7 @@
 #include "tusb.h"
 #include "class/hid/hid.h"
 #include "pico/time.h"
+#include "usb_mode.h"
 
 #define PS_KBD_INSTANCE 1
 
@@ -29,6 +30,7 @@ void ps_shortcut_reset() {
 
 void ps_shortcut_tick(const uint8_t *data, uint16_t len) {
     if (len < 10) return;
+    if (usb_xinput_mode()) return;
     if (!get_config().ps_shortcut_enabled) return;
 
     uint32_t now = to_ms_since_boot(get_absolute_time());

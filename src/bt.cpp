@@ -19,6 +19,8 @@
 #include "config.h"
 #include "dse.h"
 #include "wake.h"
+#include "usb_mode.h"
+#include "xinput.h"
 #include "pico/util/queue.h"
 #if ENABLE_BATT_LED
 #include "battery_led.h"
@@ -114,6 +116,10 @@ bool bt_disconnect() {
     // 0x13 = remote user terminated connection
     hci_send_cmd(&hci_disconnect, acl_handle, 0x13);
     return true;
+}
+
+bool bt_is_connected() {
+    return hid_control_cid != 0 && hid_interrupt_cid != 0;
 }
 
 void bt_get_signal_strength(int8_t *rssi) {
@@ -594,7 +600,7 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             // wake is on (stay on the bus so a returning controller can signal a host wake) or
             // while the host is suspended -- hiding then re-showing re-enumerates, and a USB
             // re-connect wakes a sleeping host. Defer the hide until the host is awake.
-            if (!get_config().enable_wake && !tud_suspended()) {
+            if ((usb_xinput_mode() || !get_config().enable_wake) && !tud_suspended()) {
                 tud_disconnect();
             }
 #endif
@@ -607,6 +613,7 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             bt_rssi = 0;
             hid_control_cid = 0;
             hid_interrupt_cid = 0;
+            wake_on_bt_disconnect();
             while (queue_try_remove(&send_fifo, NULL)) {}
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
 #if ENABLE_BATT_LED
@@ -614,6 +621,10 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
 #endif
             printf("[HCI] Disconnected reason=0x%02X\n", reason);
             bt_data_callback(INTERRUPT, const_cast<uint8_t *>(state_init_data), sizeof(state_init_data));
+            // state_init_data intentionally resembles a neutral DualSense
+            // packet, but its sticks are not exactly 0x80. XInput requires an
+            // exact zeroed report once the controller is gone.
+            xinput_reset_input();
             // gap_inquiry_start(30);
             // bt_inquiring = true;
             break;

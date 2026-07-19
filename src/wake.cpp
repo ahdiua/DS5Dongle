@@ -15,6 +15,7 @@
 #include "pico/time.h"
 #include "ps_shortcut.h"
 #include "config.h"
+#include "usb_mode.h"
 
 
 #define WAKE_KBD_INSTANCE     1
@@ -141,6 +142,11 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
     suspend_at_us = time_us_64();
     host_suspended = true;
     host_resumed_event = false;
+
+    // XInput mode intentionally has no wake-keyboard interface or remote-wake
+    // descriptor. Keep the suspend power-off debounce, but do not arm the HID
+    // wake state machine.
+    if (usb_xinput_mode()) return;
     
     // Everything below is the wake-UP path (press a key to wake the host) -- enable_wake only.
     if (!get_config().enable_wake) return;
@@ -156,6 +162,7 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
 }
 
 void wake_on_bt_connect(void) {
+    if (usb_xinput_mode()) return;
     if (!get_config().enable_wake) return;
     critical_section_enter_blocking(&wake_cs);
     const bool should_wake = host_suspended &&
@@ -183,6 +190,7 @@ extern "C" void tud_mount_cb(void) {
 }
 
 void wake_on_bt_input(const uint8_t *hid_input, uint16_t len) {
+    if (usb_xinput_mode()) return;
     if (!get_config().enable_wake) return;
     if (len < 10) return;
     // DualSense BT 0x31 input report layout (after main.cpp's `data + 3` skip):
@@ -241,6 +249,8 @@ void wake_task(void) {
         suspend_at_us = 0;
         WAKE_DBG("suspend debounce elapsed -> bt_power_off_controller()");
     }
+
+    if (usb_xinput_mode()) return;
 
     // The wake-UP FSM below only runs when wake is enabled.
     if (!get_config().enable_wake) return;

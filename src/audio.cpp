@@ -24,6 +24,7 @@
 #include "pico/flash.h"
 #include "pico/util/queue.h"
 #include "config.h"
+#include "usb_mode.h"
 
 #define INPUT_CHANNELS    4
 #define OUTPUT_CHANNELS   2
@@ -174,6 +175,8 @@ void __not_in_flash_func(audio_bt_task)() {
 }
 
 void __not_in_flash_func(audio_loop)() {
+    if (usb_xinput_mode()) return;
+
     const Config_body &cfg = get_config();
     const bool mic_enabled = mic_active && cfg.mic_select != 3;
     const bool speaker_enabled = cfg.speaker_select != 3;
