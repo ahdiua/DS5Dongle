@@ -58,8 +58,17 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# winget emits UTF-8, but PowerShell can otherwise decode native-process output
+# with the active Windows code page (for example GBK/936 on a Chinese system).
+# Keep the console and PowerShell's native-command pipeline on the same encoding
+# so localized package-manager output is not rendered as mojibake.
+$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $Utf8NoBom
+[Console]::OutputEncoding = $Utf8NoBom
+$OutputEncoding = $Utf8NoBom
+
 # Bump on every change so a stale download is obvious in the banner.
-$SCRIPT_REV   = '2026-05-16.7'
+$SCRIPT_REV   = '2026-07-19.1'
 
 # --- Pinned versions: keep in sync with .github/workflows/build-firmware.yml ---
 $PICO_SDK_REF = '2.2.0'
