@@ -214,10 +214,10 @@ core-voltage bump.**
 
 You don't even need to clone this repo. Download just
 [`tools/build-windows.ps1`](tools/build-windows.ps1) to any folder and run
-it in **PowerShell**:
+it in **PowerShell 7**:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build-windows.ps1
+pwsh .\build-windows.ps1
 ```
 
 (If you already have a checkout, run `tools\build-windows.ps1` from the
@@ -230,6 +230,21 @@ plus the pinned Pico SDK + TinyUSB into `%USERPROFILE%\.ds5-build`, builds
 the firmware, and drops `ds5-bridge.uf2` next to the script and on your
 Desktop. It is safe to re-run; already-installed tools are skipped.
 
+To remove this checkout's `build` directory and UF2 files generated next to
+the cleanup script, run:
+
+```powershell
+pwsh .\tools\clean-windows.ps1
+```
+
+Use `-Desktop` to additionally remove generated Desktop UF2 files,
+`-Dependencies` to additionally remove the builder-owned
+`%USERPROFILE%\.ds5-build` environment, or `-All` for both. Preview any cleanup
+with `-WhatIf`, for example `pwsh .\tools\clean-windows.ps1 -All -WhatIf`.
+The script refuses to remove a managed DS5Dongle clone with uncommitted files
+unless `-Force` is explicitly supplied. System tools installed by `winget` are
+left installed.
+
 Build a fork or a specific ref with `-Repo <url>` / `-Ref <branch|tag>`.
 
 Build a variant with `-Variant debug`.
@@ -238,15 +253,11 @@ Build a variant with `-Variant debug`.
 
 To build from source manually:
 
-1. Install the Pico SDK 2.3.0 and switch its TinyUSB submodule to tag 0.21.0
-   i.e. ***Update TinyUSB in the Pico SDK to the latest version***
+1. Install the Pico SDK 2.3.0 and switch its TinyUSB submodule to tag 0.21.0.
 2. Initialise this repo's submodules: `git submodule update --init --recursive`
 3. Configure and build with the standard Pico SDK toolchain:
    `cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPICO_SDK_PATH=<sdk>`
    then `cmake --build build --target ds5-bridge`
-
-1. ***Update TinyUSB in the Pico SDK to the latest version***
-2. Compile using standard Pico SDK toolchain
 
 On macOS, `tools/build-macos.sh` can prepare a repo-local Pico SDK checkout, prompt to install missing Homebrew build
 tools, initialize submodules, pin TinyUSB, and build the firmware:

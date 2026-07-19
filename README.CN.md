@@ -48,7 +48,11 @@ Pico W 由于性能问题，只能支持震动，不支持扬声器。
 你可以通过开启 `-DPICO_W_BUILD=ON` 编译项去开启 Pico W 固件编译，或者在 Github Action 下载预编译的固件
 
 ### USB 唤醒支持
-这是一项实验性的功能。如果你需要该功能，请前往 feat/usb-wake 分支进行编译，或者使用该分支对应的 Github Action 预编译固件。`ds5-bridge-wake.uf2` 为该功能的固件
+
+标准固件已经内置 PS 键唤醒功能，不再需要单独的 `feat/usb-wake` 分支或
+`ds5-bridge-wake.uf2`。该功能默认关闭，可在网页配置中打开“按 PS 键从睡眠中唤醒
+PC”。启用后，适配器会增加 HID 键盘接口并声明 USB 远程唤醒能力；关闭时不会枚举
+该接口。
 
 极为建议在使用该功能前阅读  #60 和 #61
 
@@ -58,14 +62,63 @@ https://github.com/zurce/DS5Dongle-OLED
 
 # 当前问题:
 - 声音可能有点小卡顿
-- 由于编码需要，需要对pico进行超频，当前的参数是1.2V 320MHz。
-- 若您的pico使用该超频参数无法启动，请自行增加电压或者降低频率
+
+# 性能
+
+音频编解码、重采样以及蓝牙/USB 热路径现在从 RAM 执行。完整音频路径可在默认的
+150 MHz 时钟下运行，不再需要旧版本使用的 320 MHz、1.2 V 超频设置。
 
 # 未来计划
 请查看[DS5Dongle plan](https://github.com/users/awalol/projects/5)
 
 # 编译
-需要将pico sdk里面的tinyusb版本升级到最新
+
+### Windows 11（PowerShell 7，无需 WSL）
+
+如果已经克隆仓库，请在仓库根目录运行：
+
+```powershell
+pwsh .\tools\build-windows.ps1
+```
+
+也可以只下载 [`tools/build-windows.ps1`](tools/build-windows.ps1)，然后在其所在目录运行：
+
+```powershell
+pwsh .\build-windows.ps1
+```
+
+脚本会准备 CMake、Ninja、Python、Git、ARM GNU 工具链、Pico SDK 和 TinyUSB，
+并将依赖环境放在 `%USERPROFILE%\.ds5-build`。生成的 `ds5-bridge.uf2` 会复制到
+脚本目录和桌面。重复运行时会复用已经安装的依赖。
+
+### Windows 构建环境清理
+
+默认清理当前仓库的 `build` 目录，以及清理脚本旁生成的 UF2：
+
+```powershell
+pwsh .\tools\clean-windows.ps1
+```
+
+预览完整清理（包括 `%USERPROFILE%\.ds5-build` 依赖环境和桌面固件副本）：
+
+```powershell
+pwsh .\tools\clean-windows.ps1 -All -WhatIf
+```
+
+确认预览无误后去掉 `-WhatIf` 即可执行。可用 `-Desktop` 仅增加桌面 UF2 清理，
+或用 `-Dependencies` 增加 `.ds5-build` 清理；`-All` 同时启用两者。如果托管的
+DS5Dongle 克隆中有未提交文件，脚本会拒绝删除，只有确认要丢弃这些文件时才使用
+`-Force`。通过 `winget` 安装的系统级工具不会被卸载。
+
+### 其他平台
+
+手动构建需要 Pico SDK 2.3.0，并将 SDK 内的 TinyUSB 子模块切换到 0.21.0。然后运行：
+
+```sh
+git submodule update --init --recursive
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPICO_SDK_PATH=<sdk路径>
+cmake --build build --target ds5-bridge
+```
 
 # 致谢
  - [rafaelvaloto/Pico_W-Dualsense](https://github.com/rafaelvaloto/Pico_W-Dualsense) - 灵感来源

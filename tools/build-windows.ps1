@@ -33,14 +33,14 @@
 .EXAMPLE
     # Standalone: download just this file anywhere and run it - it clones
     # the project under %USERPROFILE%\.ds5-build and builds it.
-    powershell -ExecutionPolicy Bypass -File .\build-windows.ps1
+    pwsh .\build-windows.ps1
 
 .EXAMPLE
     # From inside a cloned repo:
-    powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1 -Variant wake
+    pwsh .\tools\build-windows.ps1 -Variant wake
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File .\build-windows.ps1 -Repo https://github.com/youruser/DS5Dongle.git -Ref master
+    pwsh .\build-windows.ps1 -Repo https://github.com/youruser/DS5Dongle.git -Ref master
 #>
 
 [CmdletBinding()]
@@ -68,11 +68,11 @@ $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = $Utf8NoBom
 
 # Bump on every change so a stale download is obvious in the banner.
-$SCRIPT_REV   = '2026-07-19.1'
+$SCRIPT_REV   = '2026-07-19.2'
 
 # --- Pinned versions: keep in sync with .github/workflows/build-firmware.yml ---
-$PICO_SDK_REF = '2.2.0'
-$TINYUSB_REF  = '0.20.0'
+$PICO_SDK_REF = '2.3.0'
+$TINYUSB_REF  = '0.21.0'
 $ARM_VER      = '14.2.rel1'
 $ARM_ZIP      = "arm-gnu-toolchain-$ARM_VER-mingw-w64-x86_64-arm-none-eabi.zip"
 $ARM_URL      = "https://developer.arm.com/-/media/Files/downloads/gnu/$ARM_VER/binrel/$ARM_ZIP"
@@ -256,16 +256,29 @@ function Ensure-HostCompiler {
     Ok "Host compiler: $binDir"
 }
 
-# --- Pico SDK 2.2.0 + TinyUSB 0.20.0 (mirrors build-firmware.yml) -------------
+# --- Pico SDK + TinyUSB (mirrors build-firmware.yml) --------------------------
 function Ensure-PicoSdk {
     if (-not (Test-Path (Join-Path $SdkPath 'pico_sdk_init.cmake'))) {
         Info "Cloning Pico SDK $PICO_SDK_REF..."
         git clone --depth 1 --branch $PICO_SDK_REF `
             https://github.com/raspberrypi/pico-sdk.git $SdkPath
-        git -C $SdkPath submodule update --init --recursive
     } else {
         Ok 'Pico SDK already present.'
     }
+
+    $onSdkTag = (git -C $SdkPath describe --tags --exact-match 2>$null)
+    if ($onSdkTag -ne $PICO_SDK_REF) {
+        Info "Switching Pico SDK to $PICO_SDK_REF..."
+        if (-not (git -C $SdkPath rev-parse -q --verify "refs/tags/$PICO_SDK_REF" 2>$null)) {
+            git -C $SdkPath fetch --depth 1 origin `
+                "refs/tags/${PICO_SDK_REF}:refs/tags/$PICO_SDK_REF"
+        }
+        git -C $SdkPath checkout --detach $PICO_SDK_REF
+    } else {
+        Ok "Pico SDK already at $PICO_SDK_REF."
+    }
+    git -C $SdkPath submodule update --init --recursive
+
     $tinyusb = Join-Path $SdkPath 'lib\tinyusb'
     $onTag = (git -C $tinyusb describe --tags --exact-match 2>$null)
     if ($onTag -ne $TINYUSB_REF) {
