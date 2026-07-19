@@ -360,6 +360,15 @@ jobs:
         run: |
           set -euo pipefail
 
+          if ! gh release view "$UPLOAD_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release create "$UPLOAD_TAG" \
+              --repo "$GH_REPO" \
+              --target "${{ inputs.ref }}" \
+              --title "$UPLOAD_TAG" \
+              --notes "" \
+              --verify-tag
+          fi
+
           for name in \
             "ds5-bridge.uf2" \
             "ds5-bridge-debug${ASSET_SUFFIX}.uf2" \
