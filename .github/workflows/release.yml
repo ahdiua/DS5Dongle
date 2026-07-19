@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to build and attach UF2 assets for
+        description: Tag to build; a GitHub Release is created if it does not exist
         required: true
         type: string
 

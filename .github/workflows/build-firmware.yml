@@ -30,7 +30,7 @@ on:
         type: string
         default: ""
       upload_tag:
-        description: If set, uploads the built UF2s to this release tag
+        description: If set, creates/reuses this release and uploads the built UF2s
         required: false
         type: string
         default: ""
@@ -349,6 +349,25 @@ jobs:
 
           if compgen -G "other-boards/*.uf2" > /dev/null; then
             (cd other-boards && zip -9 -q "../release-assets/other board.zip" ./*.uf2)
+          fi
+
+      - name: Ensure GitHub release exists
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          UPLOAD_TAG: ${{ inputs.upload_tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$UPLOAD_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "Release $UPLOAD_TAG already exists."
+          else
+            echo "Creating release $UPLOAD_TAG."
+            gh release create "$UPLOAD_TAG" \
+              --repo "$GH_REPO" \
+              --verify-tag \
+              --title "$UPLOAD_TAG" \
+              --generate-notes
           fi
 
       - name: Remove stale UF2 release assets
