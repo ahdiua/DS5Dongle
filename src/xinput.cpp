@@ -232,6 +232,7 @@ void xinput_on_dualsense_report(const uint8_t *data, uint16_t len) {
     if (data[8] & 0x40) report.buttons |= XINPUT_LEFT_THUMB;
     if (data[8] & 0x80) report.buttons |= XINPUT_RIGHT_THUMB;
     if (data[9] & 0x01) report.buttons |= XINPUT_GUIDE; // PS
+    if (data[9] & 0x02) report.buttons |= XINPUT_BACK; // Touchpad click
 
     report.left_trigger = data[4];
     report.right_trigger = data[5];

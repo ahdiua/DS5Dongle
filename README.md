@@ -90,7 +90,8 @@ controller and reset control — no unplugging or re-flashing needed:
 
 XInput mode is intended for Windows 10/11 games that expect an Xbox controller.
 It exposes the standard buttons, D-pad, sticks, analog triggers, Guide button, and
-two-motor rumble through Windows' built-in Xbox 360 controller driver. Touchpad,
+two-motor rumble through Windows' built-in Xbox 360 controller driver. Pressing
+the touchpad anywhere maps to the Xbox Back/View button. Touch position data,
 motion sensors, controller audio, adaptive triggers, and the web configuration
 interface are not exposed while this mode is active.
 
