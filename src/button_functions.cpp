@@ -76,28 +76,28 @@ static bool button_read_bootsel() {
 // Act on a completed click sequence once the inter-click window closes.
 static void button_dispatch(int clicks) {
     if (clicks <= 1) {
-        bt_bootsel_click_action(); // single click -> pair / switch controller
-    } else if (clicks == 2) {
-        // double click -> normal reboot. A Cortex-M33 SYSRESETREQ does a warm
-        // reset that re-runs the flash app; a watchdog reset instead drops the
-        // RP2350 bootrom into BOOTSEL, which is why watchdog_reboot/enable bricked.
-        printf("[BTN] BOOTSEL double click - reboot\n");
-        *((volatile uint32_t *) 0xe000ed0c) = 0x05fa0004; // SCB AIRCR: VECTKEY | SYSRESETREQ
-        __dsb();
-        while (true) { tight_loop_contents(); } // wait for the reset
-    } else if (clicks == 3) {
-        // triple click -> reboot into BOOTSEL (USB mass storage) for reflashing.
-        printf("[BTN] BOOTSEL triple click - reboot to BOOTSEL\n");
-        reset_usb_boot(0, 0); // noreturn
-    } else if (clicks == 4) {
         usb_gamepad_toggle_mode();
         const int pulses = usb_xinput_mode() ? 2 : 1;
         mode_flash_toggles_remaining = pulses * 2;
         mode_flash_led_state = false;
         mode_flash_last_toggle_ms = to_ms_since_boot(get_absolute_time());
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
-        printf("[BTN] BOOTSEL four clicks - %s mode\n",
+        printf("[BTN] BOOTSEL click - %s mode\n",
                usb_xinput_mode() ? "XInput" : "DualSense");
+    } else if (clicks == 2) {
+        bt_bootsel_controller_action(); // double click -> pair / switch controller
+    } else if (clicks == 3) {
+        // triple click -> normal reboot. A Cortex-M33 SYSRESETREQ does a warm
+        // reset that re-runs the flash app; a watchdog reset instead drops the
+        // RP2350 bootrom into BOOTSEL, which is why watchdog_reboot/enable bricked.
+        printf("[BTN] BOOTSEL triple click - reboot\n");
+        *((volatile uint32_t *) 0xe000ed0c) = 0x05fa0004; // SCB AIRCR: VECTKEY | SYSRESETREQ
+        __dsb();
+        while (true) { tight_loop_contents(); } // wait for the reset
+    } else if (clicks == 4) {
+        // four clicks -> reboot into BOOTSEL (USB mass storage) for reflashing.
+        printf("[BTN] BOOTSEL four clicks - reboot to BOOTSEL\n");
+        reset_usb_boot(0, 0); // noreturn
     } else {
         printf("[BTN] Ignoring unsupported BOOTSEL click count: %d\n", clicks);
     }
@@ -105,7 +105,7 @@ static void button_dispatch(int clicks) {
 
 // Poll BOOTSEL at 10 Hz and dispatch click sequences + hold:
 //   - hold (>= HOLD_SAMPLES, ~1.5 s) -> clear all pairings
-//   - 1 click -> pair/switch, 2 -> reboot, 3 -> BOOTSEL, 4 -> USB mode
+//   - 1 click -> USB mode, 2 -> pair/switch, 3 -> reboot, 4 -> BOOTSEL
 // Clicks are counted across the inter-click window; the action fires when it closes.
 // Also services the deferred blacklist persist on the same cadence.
 void button_check() {

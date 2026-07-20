@@ -6,10 +6,10 @@
 #define DS5_BRIDGE_BUTTON_FUNCTIONS_H
 
 // Poll the BOOTSEL button at 10 Hz and dispatch gestures:
-//   single click  -> pair another controller   (bt_bootsel_click_action)
-//   double click  -> reboot the Pico
-//   triple click  -> reboot into BOOTSEL
-//   four clicks   -> toggle DualSense / XInput USB mode
+//   single click  -> toggle DualSense / XInput USB mode
+//   double click  -> pair another controller   (bt_bootsel_controller_action)
+//   triple click  -> reboot the Pico
+//   four clicks   -> reboot into BOOTSEL
 //   ~1.5 s hold   -> clear all pairings         (bt_bootsel_hold_action)
 void button_check();
 

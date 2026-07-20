@@ -35,7 +35,7 @@ void init_feature();
 void set_feature_data(uint8_t reportId, uint8_t* data,uint16_t len);
 void bt_inquiring_led();
 // BOOTSEL button actions, dispatched from button_functions.cpp.
-void bt_bootsel_click_action();
+void bt_bootsel_controller_action();
 void bt_bootsel_hold_action();
 void bt_blacklist_persist_if_dirty();
 void update_state(const SetStateData& state);

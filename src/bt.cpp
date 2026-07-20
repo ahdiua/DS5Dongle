@@ -284,12 +284,12 @@ void bt_blacklist_persist_if_dirty() {
     bt_blacklist_persist();
 }
 
-// BOOTSEL click action: trigger a fresh inquiry to pair another controller.
+// BOOTSEL controller action: trigger a fresh inquiry to pair another controller.
 // If currently connected, disconnect (which triggers inquiry restart via the
 // disconnect handler) - link key is preserved so the disconnected controller
 // can still reconnect later.
-void bt_bootsel_click_action() {
-    printf("[BT] BOOTSEL click - fresh inquiry\n");
+void bt_bootsel_controller_action() {
+    printf("[BT] BOOTSEL controller action - fresh inquiry\n");
     if (hid_interrupt_cid != 0) {
         bt_disconnect();
     } else {

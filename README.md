@@ -11,7 +11,7 @@ The upstream project provides the core Bluetooth-to-USB DualSense bridge; this
 fork keeps that functionality while adding the following features:
 
 - Runtime switching between native DualSense and Xbox 360-compatible XInput
-  modes by four-clicking BOOTSEL.
+  modes by clicking BOOTSEL.
 - A practical fixed XInput mapping for Windows: PS becomes Xbox Guide, and a
   touchpad click anywhere becomes Back/View.
 - Multi-click BOOTSEL controls for pairing/scanning, rebooting, entering the
@@ -74,30 +74,30 @@ You have two options:
 While the firmware is running, the Pico's **BOOTSEL button** doubles as a
 controller and reset control — no unplugging or re-flashing needed:
 
-- **Short press (click):**
+- **Short press (click):** Toggle between the native **DualSense** USB device
+  and an **Xbox 360-compatible XInput** controller. The onboard LED flashes once
+  for DualSense mode or twice for XInput mode. Windows briefly removes and
+  reconnects the USB controller when the mode changes; the Bluetooth controller
+  stays paired and connected.
+- **Double click:**
   - If a controller is connected, the current one is disconnected (its pairing is
     kept, so it can reconnect later). Use this to free the dongle for a different
     already-paired controller.
   - If nothing is connected, a 30-second scan starts to pair a new controller.
     Put the DualSense into pairing mode (hold **PS + Create/Share** until the
     light bar flashes) while the scan runs.
-- **Double click:** **Reboot the Pico** — a normal firmware restart: re-enters
+- **Triple click:** **Reboot the Pico** — a normal firmware restart: re-enters
   pairing inquiry, drops the current connection, and recovers from a transient
   glitch. (Clicks register after a brief pause, to allow a multi-click gesture.)
-- **Triple click:** **Reboot into BOOTSEL** — the dongle re-enumerates as a USB
+- **Four clicks:** **Reboot into BOOTSEL** — the dongle re-enumerates as a USB
   mass-storage drive so you can drag on a new `.uf2`, without holding BOOTSEL while
   plugging in.
-- **Four clicks:** Toggle between the native **DualSense** USB device and an
-  **Xbox 360-compatible XInput** controller. The onboard LED flashes once for
-  DualSense mode or twice for XInput mode. Windows briefly removes and reconnects
-  the USB controller when the mode changes; the Bluetooth controller stays paired
-  and connected.
 - **Long press (~1.5 s):** Disconnect and **forget every paired controller** — all
   stored pairings are deleted and blacklisted so they won't silently auto-reconnect,
   even across a power cycle. The onboard LED flashes six times to confirm. To use a
   forgotten controller again, put it back into **PS + Create/Share** pairing mode.
 
-> Triple click is a software path into the bootloader; you can also still enter it
+> Four clicks is a software path into the bootloader; you can also still enter it
 > the hardware way by holding BOOTSEL **while plugging in** the Pico (see
 > [Flashing Firmware](#flashing-firmware) above). All of these act on
 > click / double / triple / four-click / long-press **while the firmware is already running**.
@@ -112,7 +112,7 @@ motion sensors, controller audio, adaptive triggers, and the web configuration
 interface are not exposed while this mode is active.
 
 The selection is deliberately temporary: a normal reboot or power cycle always
-starts in native DualSense mode. Four-click BOOTSEL again to return immediately.
+starts in native DualSense mode. Click BOOTSEL again to return immediately.
 This mode is for a Windows PC and does not make the adapter compatible with an
 Xbox console.
 
