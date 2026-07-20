@@ -39,6 +39,18 @@ bool ds_mode() {
     return get_config().controller_mode == 0;
 }
 
+uint8_t polling_interval() {
+    switch (get_config().polling_rate_mode) {
+        case 0:
+            return 0x04;
+        case 1:
+            return 0x02;
+        case 2:
+        default:
+            return 0x01;
+    }
+}
+
 enum {
     ITF_NUM_AUDIO_CONTROL = 0,
     ITF_NUM_AUDIO_STREAMING_OUT,
@@ -467,7 +479,7 @@ uint8_t descriptor_configuration[] = {
 
 // Xbox 360 wired-controller interface. The 16-byte class-specific descriptor
 // and endpoint layout match the protocol consumed by Windows' XUSB driver.
-uint8_t const descriptor_configuration_xinput[] = {
+uint8_t descriptor_configuration_xinput[] = {
     0x09, TUSB_DESC_CONFIGURATION,
     0x30, 0x00, // wTotalLength = 48
     0x01,       // bNumInterfaces
@@ -501,6 +513,7 @@ uint8_t const descriptor_configuration_xinput[] = {
     0x08,       // 8 ms
 };
 static_assert(sizeof(descriptor_configuration_xinput) == 48);
+constexpr uint8_t XINPUT_IN_INTERVAL_OFFSET = 40;
 
 // Invoked when received GET CONFIGURATION DESCRIPTOR
 // Application return pointer to descriptor
@@ -508,20 +521,10 @@ static_assert(sizeof(descriptor_configuration_xinput) == 48);
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     (void) index; // for multiple configurations
     if (usb_xinput_mode()) {
+        descriptor_configuration_xinput[XINPUT_IN_INTERVAL_OFFSET] = polling_interval();
         return descriptor_configuration_xinput;
     }
-    auto bInterval = 0x01;
-    switch (get_config().polling_rate_mode) {
-        case 0:
-            bInterval = 0x04;
-            break;
-        case 1:
-            bInterval = 0x02;
-            break;
-        case 2:
-            bInterval = 0x01;
-            break;
-    }
+    const auto bInterval = polling_interval();
     constexpr auto offset = CONFIG_DESC_LEN_BASE;
     descriptor_configuration[offset - 1] = bInterval;
     descriptor_configuration[offset - 8] = bInterval;

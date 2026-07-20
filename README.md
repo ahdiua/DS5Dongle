@@ -111,6 +111,10 @@ the touchpad anywhere maps to the Xbox Back/View button. Touch position data,
 motion sensors, controller audio, adaptive triggers, and the web configuration
 interface are not exposed while this mode is active.
 
+The XInput input endpoint follows the saved polling-rate setting (250 Hz,
+500 Hz, or real-time). Configure it in native DualSense mode before switching
+to XInput because the web configuration interface is unavailable in XInput mode.
+
 The selection is deliberately temporary: a normal reboot or power cycle always
 starts in native DualSense mode. Click BOOTSEL again to return immediately.
 This mode is for a Windows PC and does not make the adapter compatible with an
