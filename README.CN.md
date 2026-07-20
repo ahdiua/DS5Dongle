@@ -2,6 +2,21 @@
 [English](./README.md)
 > 将 Pico2W 变成 DS5 手柄的无线适配器
 
+# 关于本 Fork
+
+**本仓库是 [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle) 的 Fork。**
+上游项目实现了 DualSense 蓝牙转 USB 的核心功能；本 Fork 在保留上游功能的基础上，
+主要增加了以下特点：
+
+- 四击 BOOTSEL，可在原生 DualSense 与 Xbox 360 兼容 XInput 模式之间实时切换。
+- 面向 Windows 的固定 XInput 映射：PS 键映射为 Xbox Guide，触摸板任意位置点击
+  映射为 Back/View。
+- BOOTSEL 多击控制：扫描/切换手柄、重启、进入刷机模式、切换 USB 模式和清除配对。
+- Windows PowerShell 7 一键构建及环境清理脚本，固定依赖版本并支持 UTF-8 输出。
+- 为 Pico2W、Pico W 和 Waveshare RP2350B-Plus-W 提供 CI 编译及发布固件。
+
+感谢上游作者及贡献者完成原始项目和核心固件。
+
 # 功能特点
  - 支持HD震动
  - 支持在运行时切换为 Windows 10/11 可识别的 Xbox 360 兼容 XInput 手柄
@@ -85,7 +100,7 @@ pwsh .\tools\build-windows.ps1
 也可以只下载 [`tools/build-windows.ps1`](tools/build-windows.ps1)，然后在其所在目录运行：
 
 ```powershell
-pwsh .\build-windows.ps1
+pwsh .\build-windows.ps1 -Repo https://github.com/ahdiua/DS5Dongle.git
 ```
 
 脚本会准备 CMake、Ninja、Python、Git、ARM GNU 工具链、Pico SDK 和 TinyUSB，

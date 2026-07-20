@@ -4,8 +4,24 @@
 
 > Turn a Raspberry Pi Pico2W (or other compatible board) into a wireless adapter for the DualSense (DS5) controller.
 
-***This repository only implements the core functionality of DS5Dongle — making a wireless controller appear as a wired
-connection. For additional features, please refer to [Community Fork](#Community-Fork)***
+## About this fork
+
+**This repository is a fork of [awalol/DS5Dongle](https://github.com/awalol/DS5Dongle).**
+The upstream project provides the core Bluetooth-to-USB DualSense bridge; this
+fork keeps that functionality while adding the following features:
+
+- Runtime switching between native DualSense and Xbox 360-compatible XInput
+  modes by four-clicking BOOTSEL.
+- A practical fixed XInput mapping for Windows: PS becomes Xbox Guide, and a
+  touchpad click anywhere becomes Back/View.
+- Multi-click BOOTSEL controls for pairing/scanning, rebooting, entering the
+  bootloader, switching USB mode, and clearing saved pairings.
+- PowerShell 7 build and cleanup tools for Windows, with pinned dependencies and
+  UTF-8 console output.
+- CI and release artifacts for Pico2W, Pico W, and Waveshare RP2350B-Plus-W
+  variants.
+
+Upstream deserves full credit for the original project and its core firmware.
 
 ## Overview
 
@@ -218,7 +234,7 @@ You don't even need to clone this repo. Download just
 it in **PowerShell 7**:
 
 ```powershell
-pwsh .\build-windows.ps1
+pwsh .\build-windows.ps1 -Repo https://github.com/ahdiua/DS5Dongle.git
 ```
 
 (If you already have a checkout, run `tools\build-windows.ps1` from the
