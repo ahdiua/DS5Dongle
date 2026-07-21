@@ -28,10 +28,14 @@ bool usb_xinput_mode() {
 void usb_gamepad_toggle_mode() {
     const bool controller_connected = bt_is_connected();
 
-    // Stop effects owned by the old USB identity before removing it. A USB
-    // disconnect does not itself guarantee that the wireless controller gets
-    // a final zero-rumble packet.
-    xinput_stop_rumble();
+    // Discard audio/haptic packets owned by the old USB identity before
+    // enqueueing the final actuator state. This guarantees queue capacity for
+    // the zero-rumble and adaptive-trigger-off packet; a USB disconnect alone
+    // does not change state on the wireless controller.
+    if (controller_connected) {
+        bt_discard_pending_output();
+        xinput_clear_controller_effects();
+    }
     if (audio_mic_active()) {
         set_mic_active(false);
     }

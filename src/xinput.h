@@ -16,7 +16,7 @@ void xinput_task();
 // Clear host-visible input state after a controller or mode disconnect.
 void xinput_reset_input();
 
-// Stop both DualSense compatibility-rumble motors.
-void xinput_stop_rumble();
+// Clear effects that cannot be represented after changing USB identity.
+void xinput_clear_controller_effects();
 
 #endif // DS5_BRIDGE_XINPUT_H

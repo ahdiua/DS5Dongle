@@ -96,6 +96,44 @@ void apply_rumble(uint8_t large_motor, uint8_t small_motor) {
     update_state(state);
 }
 
+void apply_player_led(uint8_t animation) {
+    uint8_t indicators = 0x1F;
+    switch (animation) {
+        case 0x00: // all off
+            indicators = 0x00;
+            break;
+        case 0x02: // flash player 1, then on
+        case 0x06: // player 1 on
+            indicators = 0x04;
+            break;
+        case 0x03: // flash player 2, then on
+        case 0x07: // player 2 on
+            indicators = 0x06;
+            break;
+        case 0x04: // flash player 3, then on
+        case 0x08: // player 3 on
+            indicators = 0x15;
+            break;
+        case 0x05: // flash player 4, then on
+        case 0x09: // player 4 on
+            indicators = 0x1B;
+            break;
+        default:
+            // Blink/rotate patterns have no direct DualSense equivalent.
+            // Lighting all five indicators still acknowledges the command.
+            break;
+    }
+
+    SetStateData state{};
+    state.AllowPlayerIndicators = 1;
+    state.PlayerLight1 = indicators & 0x01;
+    state.PlayerLight2 = (indicators >> 1) & 0x01;
+    state.PlayerLight3 = (indicators >> 2) & 0x01;
+    state.PlayerLight4 = (indicators >> 3) & 0x01;
+    state.PlayerLight5 = (indicators >> 4) & 0x01;
+    update_state(state);
+}
+
 bool endpoint_xfer(uint8_t rhport, uint8_t endpoint, uint8_t *buffer,
                    uint16_t len) {
 #if TUSB_VERSION_NUMBER >= 2100
@@ -188,11 +226,16 @@ bool driver_control_xfer(uint8_t rhport, uint8_t stage,
 bool driver_xfer(uint8_t rhport, uint8_t ep_addr, xfer_result_t result,
                  uint32_t transferred) {
     if (ep_addr == endpoint_out) {
-        if (result == XFER_RESULT_SUCCESS && transferred >= 5 &&
-            out_buffer[0] == 0x00 && out_buffer[1] == 0x08) {
-            // Wired Xbox 360 output: byte 3 = large/left motor,
-            // byte 4 = small/right motor.
-            apply_rumble(out_buffer[3], out_buffer[4]);
+        if (result == XFER_RESULT_SUCCESS) {
+            if (transferred >= 5 && out_buffer[0] == 0x00 &&
+                out_buffer[1] == 0x08) {
+                // Wired Xbox 360 output: byte 3 = large/left motor,
+                // byte 4 = small/right motor.
+                apply_rumble(out_buffer[3], out_buffer[4]);
+            } else if (transferred >= 3 && out_buffer[0] == 0x01 &&
+                       out_buffer[1] == 0x03) {
+                apply_player_led(out_buffer[2]);
+            }
         }
         memset(out_buffer, 0, sizeof(out_buffer));
         return arm_out_endpoint();
@@ -290,10 +333,18 @@ void xinput_reset_input() {
     critical_section_exit(&report_cs);
 }
 
-void xinput_stop_rumble() {
-    if (bt_is_connected()) {
-        apply_rumble(0, 0);
-    }
+void xinput_clear_controller_effects() {
+    if (!bt_is_connected()) return;
+
+    SetStateData state{};
+    // Select compatibility rumble so the zero motor values are consumed, and
+    // explicitly disable both adaptive-trigger programs. Zero is the trigger
+    // effect-off mode; merely changing the USB descriptor does not clear it.
+    state.UseRumbleNotHaptics = 1;
+    state.EnableImprovedRumbleEmulation = 1;
+    state.AllowRightTriggerFFB = 1;
+    state.AllowLeftTriggerFFB = 1;
+    update_state(state);
 }
 
 usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count) {

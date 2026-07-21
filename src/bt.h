@@ -29,6 +29,11 @@ void bt_set_scan_active();
 void dse_unlock_task();
 bool bt_dse_profiles_ready();
 void bt_write(const uint8_t *data, uint16_t len);
+
+// Drop queued interrupt-channel output that belongs to the old USB identity.
+// An already active L2CAP transfer cannot be cancelled, but subsequent state
+// written after this call is guaranteed to have queue capacity.
+void bt_discard_pending_output();
 void bt_get_signal_strength(int8_t *rssi);
 std::vector<uint8_t> get_feature_data(uint8_t reportId,uint16_t len);
 void init_feature();

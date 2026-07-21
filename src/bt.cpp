@@ -850,6 +850,10 @@ void __not_in_flash_func(bt_write)(const uint8_t *data, const uint16_t len) {
     }
 }
 
+void bt_discard_pending_output() {
+    while (queue_try_remove(&send_fifo, nullptr)) {}
+}
+
 vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
     // 若为0x81则会请求新内容，其他若有旧数据则不进行请求
     auto ret = vector<uint8_t>{};
