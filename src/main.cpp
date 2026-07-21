@@ -349,6 +349,7 @@ int main() {
 
     // Initialize the critical section for the report buffer
     critical_section_init(&report_cs);
+    xinput_init();
     wake_init();
 
     config_load();

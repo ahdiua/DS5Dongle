@@ -7,7 +7,10 @@
 // Bluetooth 0x31 header) into the Xbox 360 report mapper.
 void xinput_on_dualsense_report(const uint8_t *data, uint16_t len);
 
-// Submit the latest mapped state whenever the XInput IN endpoint is ready.
+// Initialize synchronization for the mapped input report.
+void xinput_init();
+
+// Submit a mapped state only after fresh Bluetooth input arrives.
 void xinput_task();
 
 // Clear host-visible input state after a controller or mode disconnect.

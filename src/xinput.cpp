@@ -4,6 +4,7 @@
 
 #include "bt.h"
 #include "device/usbd_pvt.h"
+#include "pico/critical_section.h"
 #include "tusb.h"
 #include "usb_mode.h"
 #include "utils.h"
@@ -65,6 +66,8 @@ static_assert(scale_axis(255, true) == -32768);
 XInputReport latest_report{.report_id = 0x00, .report_size = sizeof(XInputReport)};
 alignas(4) XInputReport tx_report{.report_id = 0x00,
                                  .report_size = sizeof(XInputReport)};
+critical_section_t report_cs;
+bool report_dirty = false;
 alignas(4) uint8_t out_buffer[32]{};
 uint8_t endpoint_in = 0;
 uint8_t endpoint_out = 0;
@@ -215,6 +218,10 @@ const usbd_class_driver_t xinput_driver = {
 
 } // namespace
 
+void xinput_init() {
+    critical_section_init(&report_cs);
+}
+
 void xinput_on_dualsense_report(const uint8_t *data, uint16_t len) {
     if (data == nullptr || len < 10) return;
 
@@ -240,7 +247,11 @@ void xinput_on_dualsense_report(const uint8_t *data, uint16_t len) {
     report.left_y = scale_axis(data[1], true);
     report.right_x = scale_axis(data[2], false);
     report.right_y = scale_axis(data[3], true);
+
+    critical_section_enter_blocking(&report_cs);
     latest_report = report;
+    report_dirty = true;
+    critical_section_exit(&report_cs);
 }
 
 void xinput_task() {
@@ -249,20 +260,34 @@ void xinput_task() {
         return;
     }
 
+    critical_section_enter_blocking(&report_cs);
+    const bool should_send = report_dirty;
+    critical_section_exit(&report_cs);
+    if (!should_send) return;
+
     if (!usbd_edpt_claim(device_rhport, endpoint_in)) return;
     // TinyUSB/DCD owns this buffer until the asynchronous transfer completes.
     // Keep it separate from latest_report, which Bluetooth input may update.
+    critical_section_enter_blocking(&report_cs);
     tx_report = latest_report;
+    report_dirty = false;
+    critical_section_exit(&report_cs);
     if (!endpoint_xfer(device_rhport, endpoint_in,
                        reinterpret_cast<uint8_t *>(&tx_report),
                        sizeof(tx_report))) {
+        critical_section_enter_blocking(&report_cs);
+        report_dirty = true;
+        critical_section_exit(&report_cs);
         usbd_edpt_release(device_rhport, endpoint_in);
     }
 }
 
 void xinput_reset_input() {
+    critical_section_enter_blocking(&report_cs);
     latest_report = XInputReport{.report_id = 0x00,
                                  .report_size = sizeof(XInputReport)};
+    report_dirty = true;
+    critical_section_exit(&report_cs);
 }
 
 void xinput_stop_rumble() {
