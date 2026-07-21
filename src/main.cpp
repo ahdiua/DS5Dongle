@@ -369,6 +369,7 @@ int main() {
 #endif
         cyw43_arch_poll();
         tud_task();
+        usb_gamepad_task();
         wake_task();
         audio_loop();
 #if ENABLE_DEBUG

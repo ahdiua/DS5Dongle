@@ -114,14 +114,12 @@ interface are not exposed while this mode is active.
 The XInput input endpoint follows the saved polling-rate setting (250 Hz,
 500 Hz, or real-time). Configure it in native DualSense mode before switching
 to XInput because the web configuration interface is unavailable in XInput mode.
-When Wake-on-PS is enabled, XInput mode advertises USB remote wakeup and uses the
-next controller button report to wake the host without exposing the native
-mode's auxiliary keyboard interface.
 
-The selection is deliberately temporary: a normal reboot or power cycle always
-starts in native DualSense mode. Click BOOTSEL again to return immediately.
-This mode is for a Windows PC and does not make the adapter compatible with an
-Xbox console.
+The selection is deliberately temporary and lasts only for the current controller
+connection. Disconnecting the controller, switching controllers, rebooting, or
+power-cycling returns the dongle to native DualSense mode. Click BOOTSEL again to
+return immediately. XInput mode does not support Wake-on-PS. This mode is for a
+Windows PC and does not make the adapter compatible with an Xbox console.
 
 ## Configuration
 
@@ -308,17 +306,17 @@ The toggle is off by default, and the keyboard interface is only enumerated whil
 
 ## Wake-on-PS (optional)
 
-Enabling the **Wake PC from sleep on PS button** toggle in the [web config](#configuration) advertises USB remote wakeup.
-In native DualSense mode the dongle also presents a second HID interface (a boot keyboard), then injects an **F15**
-keypress after resume. F15 was chosen because it has no default Windows or app binding — a stray fire never inserts
-characters or triggers shortcuts. XInput mode wakes directly through its gamepad interface and does not enumerate the
-auxiliary keyboard. The toggle is off by default.
+Enabling the **Wake PC from sleep on PS button** toggle in the [web config](#configuration) makes the dongle present a
+second HID interface (a boot keyboard) and advertise USB remote wakeup. A controller button press while the host is
+suspended then injects an **F15** keypress, waking the PC from **S3 sleep**. F15 was chosen because it has no default
+Windows or app binding — a stray fire never inserts characters or triggers shortcuts. The toggle is off by default, and
+the keyboard interface is only enumerated while it (or the Xbox Game Bar shortcut) is enabled. This feature is available
+only in native DualSense mode.
 
 Scope: **S3 only.** Modern Standby (S0ix) is not supported. To check your machine, run `powercfg /a` — you need
 "Standby (S3)" listed under available sleep states.
 
-After enabling the toggle (then **Reconnect USB** so the interface re-enumerates), use native DualSense mode for these
-Windows setup and diagnostic steps:
+After enabling the toggle (then **Reconnect USB** so the interface re-enumerates):
 
 1. Open Device Manager → the new **HID Keyboard Device** (and its parent **USB Composite Device**) → Properties → Power
    Management → tick **"Allow this device to wake the computer."**

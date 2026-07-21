@@ -596,14 +596,14 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
 #if !ENABLE_SERIAL
-            // Hide the USB device when no controller is paired (upstream behavior), EXCEPT when
-            // wake is on (stay on the bus so a returning controller can signal a host wake) or
-            // while the host is suspended -- hiding then re-showing re-enumerates, and a USB
-            // re-connect wakes a sleeping host. Defer the hide until the host is awake.
-            if ((usb_xinput_mode() || !get_config().enable_wake) && !tud_suspended()) {
+            // Hide a native USB device when no controller is paired, except when wake is on or
+            // while the host is suspended. XInput detach and reset are handled below by
+            // usb_gamepad_task(), which can defer them safely until the host resumes.
+            if (!usb_xinput_mode() && !get_config().enable_wake && !tud_suspended()) {
                 tud_disconnect();
             }
 #endif
+            usb_gamepad_on_controller_disconnect();
             gap_connectable_control(1);
             gap_discoverable_control(1);
             const uint8_t reason = hci_event_disconnection_complete_get_reason(packet);

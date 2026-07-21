@@ -97,13 +97,10 @@ static void request_host_wake(const char *reason) {
 
     if (ok) {
         critical_section_enter_blocking(&wake_cs);
-        // Native mode follows remote wake with an F15 keyboard report so
-        // Windows consumes a concrete input event. XInput has no keyboard
-        // interface; its queued gamepad report is consumed after resume.
-        state = usb_xinput_mode() ? WAKE_DONE : WAKE_REQUESTED;
+        state = WAKE_REQUESTED;
         state_entered_us = time_us_64();
         critical_section_exit(&wake_cs);
-        WAKE_DBG("%s -> %s", reason, wake_state_name(state));
+        WAKE_DBG("%s -> REQUESTED", reason);
     }
 #ifdef WAKE_DEBUG
     else {
@@ -146,17 +143,13 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
     host_suspended = true;
     host_resumed_event = false;
 
+    // XInput mode intentionally has no wake-keyboard interface or remote-wake
+    // descriptor. Keep the suspend power-off debounce, but do not arm the HID
+    // wake state machine.
+    if (usb_xinput_mode()) return;
+
     // Everything below is the wake-UP path (press a key to wake the host) -- enable_wake only.
     if (!get_config().enable_wake) return;
-
-    // XInput advertises remote wake without adding the native mode's keyboard
-    // interface. Button-edge tracking remains armed, but no post-resume F15
-    // state machine is needed.
-    if (usb_xinput_mode()) {
-        state = WAKE_IDLE;
-        prev_b7 = 0x08; prev_b8 = 0x00; prev_b9 = 0x00;
-        return;
-    }
 
     // Unconditionally re-arm on suspend. If a previous wake attempt hung
     // (e.g. Linux ignored a keystroke and left the endpoint busy forever),
@@ -169,6 +162,7 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
 }
 
 void wake_on_bt_connect(void) {
+    if (usb_xinput_mode()) return;
     if (!get_config().enable_wake) return;
     critical_section_enter_blocking(&wake_cs);
     const bool should_wake = host_suspended &&
@@ -196,6 +190,7 @@ extern "C" void tud_mount_cb(void) {
 }
 
 void wake_on_bt_input(const uint8_t *hid_input, uint16_t len) {
+    if (usb_xinput_mode()) return;
     if (!get_config().enable_wake) return;
     if (len < 10) return;
     // DualSense BT 0x31 input report layout (after main.cpp's `data + 3` skip):

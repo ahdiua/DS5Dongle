@@ -14,6 +14,13 @@ extern bool spk_active;
 namespace {
 
 UsbGamepadMode current_mode = UsbGamepadMode::DualSense;
+bool reset_to_dualsense_pending = false;
+
+void set_mode(UsbGamepadMode mode) {
+    current_mode = mode;
+    printf("[USB] Runtime gamepad mode -> %s\n",
+           current_mode == UsbGamepadMode::XInput ? "XInput" : "DualSense");
+}
 
 } // namespace
 
@@ -47,14 +54,41 @@ void usb_gamepad_toggle_mode() {
     tud_disconnect();
     sleep_ms(150);
 
-    current_mode = usb_xinput_mode() ? UsbGamepadMode::DualSense
-                                     : UsbGamepadMode::XInput;
-    printf("[USB] Runtime gamepad mode -> %s\n",
-           usb_xinput_mode() ? "XInput" : "DualSense");
+    reset_to_dualsense_pending = false;
+    set_mode(usb_xinput_mode() ? UsbGamepadMode::DualSense
+                               : UsbGamepadMode::XInput);
 
     // Preserve the project's existing behavior: no controller means no USB
     // gamepad. The Bluetooth connect path will call tud_connect() later.
     if (controller_connected) {
+        tud_connect();
+    }
+}
+
+void usb_gamepad_on_controller_disconnect() {
+    if (usb_xinput_mode()) {
+        reset_to_dualsense_pending = true;
+    }
+}
+
+void usb_gamepad_task() {
+    if (!reset_to_dualsense_pending || tud_suspended()) {
+        return;
+    }
+
+    // End the temporary XInput identity before the next controller connection.
+    // If Bluetooth already came back while USB was suspended, re-enumerate the
+    // connected controller immediately using the native descriptors.
+    const bool controller_connected = bt_is_connected();
+    if (controller_connected) {
+        wake_note_usb_reconnect();
+    }
+    tud_disconnect();
+    set_mode(UsbGamepadMode::DualSense);
+    reset_to_dualsense_pending = false;
+
+    if (controller_connected) {
+        sleep_ms(150);
         tud_connect();
     }
 }
