@@ -521,6 +521,7 @@ constexpr uint8_t XINPUT_IN_INTERVAL_OFFSET = 40;
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     (void) index; // for multiple configurations
     if (usb_xinput_mode()) {
+        descriptor_configuration_xinput[7] = get_config().enable_wake ? 0xA0 : 0x80;
         descriptor_configuration_xinput[XINPUT_IN_INTERVAL_OFFSET] = polling_interval();
         return descriptor_configuration_xinput;
     }
