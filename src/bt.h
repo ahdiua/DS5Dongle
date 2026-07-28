@@ -21,7 +21,6 @@ int bt_init();
 void bt_register_data_callback(bt_data_callback_t callback);
 void bt_send_packet(uint8_t *data, uint16_t len);
 void bt_send_control(uint8_t *data, uint16_t len);
-void bt_power_off_controller();
 bool bt_disconnect();
 bool bt_is_connected();
 void bt_set_scan_idle();

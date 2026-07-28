@@ -17,7 +17,9 @@
 #include "bsp/board_api.h"
 #include "classic/sdp_server.h"
 #include "config.h"
+#include "status_gpio.h"
 #include "dse.h"
+#include "fake_ds5.h"
 #include "wake.h"
 #include "usb_mode.h"
 #include "xinput.h"
@@ -68,7 +70,6 @@ static hci_con_handle_t acl_handle = HCI_CON_HANDLE_INVALID;
 static uint16_t hid_control_cid;
 static uint16_t hid_interrupt_cid;
 static bt_data_callback_t bt_data_callback = nullptr;
-static bool check_dse = false;
 static int8_t bt_rssi = 0;
 unordered_map<uint8_t, vector<uint8_t> > feature_data;
 queue_t send_fifo;
@@ -114,12 +115,13 @@ bool bt_disconnect() {
     }
 
     // 0x13 = remote user terminated connection
+    printf("[HCI] Disconnect requested handle=0x%04X reason=0x13\n", acl_handle);
     hci_send_cmd(&hci_disconnect, acl_handle, 0x13);
     return true;
 }
 
 bool bt_is_connected() {
-    return hid_control_cid != 0 && hid_interrupt_cid != 0;
+    return hid_interrupt_cid != 0;
 }
 
 void bt_get_signal_strength(int8_t *rssi) {
@@ -368,7 +370,8 @@ void bt_inquiring_led() {
     }
 }
 
-static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_t channel, uint8_t *packet,
+                                                    uint16_t size) {
     (void) channel;
 
     const uint8_t event_type = hci_event_packet_get_type(packet);
@@ -566,10 +569,6 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
                     if (hid_control_cid == 0) {
                         l2cap_create_channel(l2cap_packet_handler, current_device_addr, PSM_HID_CONTROL, MTU_CONTROL,
                                              &hid_control_cid);
-                    } else if (hid_interrupt_cid == 0) {
-                        l2cap_create_channel(l2cap_packet_handler, current_device_addr, PSM_HID_INTERRUPT,
-                                             MTU_INTERRUPT,
-                                             &hid_interrupt_cid);
                     }
                 }
             }
@@ -580,14 +579,18 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             bd_addr_t addr;
             hci_event_connection_request_get_bd_addr(packet, addr);
             const uint32_t cod = hci_event_connection_request_get_class_of_device(packet);
+            // 这个是按 PS 键重连的时候才会触发
             printf("[HCI] Incoming ACL request from %s cod=0x%06x\n", bd_addr_to_str(addr), (unsigned int) cod);
             if (bt_blacklist_contains(addr)) {
-                printf("[HCI] Rejecting connection from %s (MAC is on persistent blacklist; re-pair via PS+Share)\n", bd_addr_to_str(addr));
+                printf("[HCI] Rejecting connection from %s (MAC is on persistent blacklist; re-pair via PS+Share)\n",
+                       bd_addr_to_str(addr));
                 hci_send_cmd(&hci_reject_connection_request, addr, 0x0F);
                 break;
             }
             if ((cod & 0x000F00) == 0x000500) {
                 bd_addr_copy(current_device_addr, addr);
+                // 这里的 stop 触发条件是：刚开机时，pico 处于 inquiry 模式，然后 DS5 通过 PS 键重连
+                // 如果在连接上以后没有停止 inquiry，会导致回报率很低
                 gap_inquiry_stop();
                 hci_send_cmd(&hci_accept_connection_request, addr, 0x01);
             }
@@ -614,7 +617,9 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             hid_control_cid = 0;
             hid_interrupt_cid = 0;
             wake_on_bt_disconnect();
-            while (queue_try_remove(&send_fifo, NULL)) {}
+            gpio_on_disconnect();
+            while (queue_try_remove(&send_fifo, NULL)) {
+            }
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
 #if ENABLE_BATT_LED
             battery_led_on_disconnect();
@@ -640,7 +645,8 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
     }
 }
 
-static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
+static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint16_t channel, uint8_t *packet,
+                                                      uint16_t size) {
     (void) channel;
 
     if (packet_type == L2CAP_DATA_PACKET) {
@@ -668,39 +674,34 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                 bt_disconnect();
             }
         } else if (channel == hid_control_cid) {
-            if (check_dse) {
-                if (packet[0] == 0xA3 && packet[1] == 0x70) {
-                    printf("Connected DSE Controller\n");
-                    check_dse = false;
-                    is_dse = true;
-                    // Unlock Edge profiles; USB connects immediately, profile
-                    // reads are gated until the snapshot is prepared.
-                    dse_on_connect();
-#if !ENABLE_SERIAL
-                    // don't re-enumerate while the host is suspended -- it would wake a sleeping host
-                    if (!tud_suspended()) tud_connect();
+            if (packet[0] == 0xA3) {
+                const uint8_t report_id = packet[1];
+                feature_data[report_id].assign(packet + 2, packet + size);
+#if ENABLE_VERBOSE
+                printf("[L2CAP] Stored Feature Report 0x%02X, len=%u\n", report_id, size - 2);
+                printf("[L2CAP] HID Control data len=%u\n", size);
+                printf_hexdump(packet, size);
 #endif
-                } else if (packet[0] == 0x02) {
-                    printf("Connected DS5 Controller\n");
-                    check_dse = false;
-                    is_dse = false;
+                if (report_id == 0x20) {
+                    if (packet[23] == 0x44) {
+                        printf("Connected DSE Controller\n");
+                        is_dse = true;
+                        dse_on_connect();
+
+                        if (get_config().controller_mode == 0) {
+                            feature_data[0x20].assign(report20,report20 + sizeof(report20));
+                        }
+                    } else {
+                        printf("Connected DS5 Controller\n");
+                        is_dse = false;
+                    }
 #if !ENABLE_SERIAL
                     if (!tud_suspended()) tud_connect();
 #endif
                 }
             }
-            if (packet[0] == 0xA3) {
-                uint8_t report_id = packet[1];
-                feature_data[report_id].assign(packet + 1, packet + size);
-#if ENABLE_VERBOSE
-                printf("[L2CAP] Stored Feature Report 0x%02X, len=%u\n", report_id, size - 1);
-#endif
-            }
+
             dse_on_control_packet(packet, size);
-#if ENABLE_VERBOSE
-            printf("[L2CAP] HID Control data len=%u\n", size);
-            printf_hexdump(packet, size);
-#endif
             bt_data_callback(CONTROL, packet, size);
         } else {
             printf("[L2CAP] Data on unknown channel 0x%04X (Interrupt: 0x%04X, Control: 0x%04X)\n",
@@ -721,10 +722,18 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                     hid_control_cid = local_cid;
 
                     const auto mtu = l2cap_get_remote_mtu_for_local_cid(hid_control_cid);
-                    printf("[L2CAP] Remote Control MTU: %d\n",mtu);
+                    printf("[L2CAP] Remote Control MTU: %d\n", mtu);
+
+                    if (new_pair) {
+                        printf("[L2CAP] Opening interrupt channel\n");
+                        l2cap_create_channel(l2cap_packet_handler, current_device_addr, PSM_HID_INTERRUPT,
+                                             MTU_INTERRUPT,
+                                             &hid_interrupt_cid);
+                    }
                 } else if (psm == PSM_HID_INTERRUPT) {
                     printf("[L2CAP] HID Interrupt opened cid=0x%04X\n", local_cid);
                     hid_interrupt_cid = local_cid;
+                    gpio_on_connect();
                     // Successful pair removes this specific MAC from the persistent
                     // blacklist (treated as user-explicit re-pair in PS+Share mode).
                     bt_blacklist_remove(current_device_addr);
@@ -753,7 +762,7 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                     update_state(state);
 
                     const auto mtu = l2cap_get_remote_mtu_for_local_cid(hid_interrupt_cid);
-                    printf("[L2CAP] Remote Interrupt MTU: %d\n",mtu);
+                    printf("[L2CAP] Remote Interrupt MTU: %d\n", mtu);
 
                     wake_on_bt_connect();
 
@@ -899,31 +908,20 @@ void set_feature_data(uint8_t reportId, uint8_t *data, uint16_t len) {
     }
 }
 
-void bt_power_off_controller() {
-    uint8_t bluetooth_control[47]{};
-    bluetooth_control[0] = 0x02; // DualSense Bluetooth control: 1=on, 2=off.
-    set_feature_data(0x08, bluetooth_control, sizeof(bluetooth_control));
-}
-
 void init_feature() {
     feature_data.clear();
     get_feature_data(0x09, 20);
     get_feature_data(0x20, 64);
     get_feature_data(0x22, 64);
     get_feature_data(0x05, 41);
-    // DSE
-    // check DSE by request 0x70 feature report. DSE return DEFAULT
-    // If len == 1, it's DS5
-    check_dse = true;
-    get_feature_data(0x70, 64);
 }
 
-void update_state(const SetStateData& state) {
+void update_state(const SetStateData &state) {
     uint8_t pkt[142]{};
     pkt[0] = 0x32;
     pkt[1] = 0x10;
     pkt[2] = 0x90;
     pkt[3] = 0x3f;
-    memcpy(pkt + 4,&state,sizeof(SetStateData));
-    bt_write(pkt,sizeof(pkt));
+    memcpy(pkt + 4, &state, sizeof(SetStateData));
+    bt_write(pkt, sizeof(pkt));
 }

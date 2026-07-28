@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "bt.h"
+#include "status_gpio.h"
 #include "utils.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -54,19 +55,19 @@ void config_valid() {
         body->haptics_gain = 1.0f;
         printf("[Config] Haptics Gain value is invalid\n");
     }
-    if (body->speaker_volume < 0 || body->speaker_volume > 127) {
+    if (body->speaker_volume > 127) {
         body->speaker_volume = 100;
         printf("[Config] Speaker Volume is invalid\n");
     }
-    if (body->headset_volume < 0 || body->headset_volume > 127) {
+    if (body->headset_volume > 127) {
         body->headset_volume = 100;
         printf("[Config] Headset Volume is invalid\n");
     }
-    if (body->speaker_gain < 0 || body->speaker_gain > 7) {
+    if (body->speaker_gain > 7) {
         body->speaker_gain = 2;
         printf("[Config] speaker_gain is invalid\n");
     }
-    if (body->inactive_time < 0 || body->inactive_time > 60) {
+    if (body->inactive_time > 60) {
         body->inactive_time = 30;
         printf("[Config] Inactive time is invalid\n");
     }
@@ -113,6 +114,14 @@ void config_valid() {
     if (body->lock_volume > 1) {
         body->lock_volume = 0;
         printf("[Config] lock_volume is invalid\n");
+    }
+    if (!status_gpio_pin_valid(body->status_gpio_pin)) {
+        body->status_gpio_pin = STATUS_GPIO_DISABLED;
+        printf("[Config] status_gpio_pin is invalid\n");
+    }
+    if (body->status_gpio_mode > STATUS_GPIO_MODE_BUTTON) {
+        body->status_gpio_mode = 0;
+        printf("[Config] status_gpio_mode is invalid\n");
     }
 }
 
@@ -161,9 +170,19 @@ Config_body& get_config() {
 }
 
 void set_config(const uint8_t *new_config, const uint16_t len) {
+    const bool controller_connected = bt_is_connected();
+    gpio_on_disconnect();
+
     const auto copy_len = len < sizeof(Config_body) ? len : sizeof(Config_body);
     memcpy(&config.body, new_config, copy_len);
     config_valid();
+
+    if (controller_connected && config.body.status_gpio_mode != STATUS_GPIO_MODE_BUTTON) {
+        gpio_on_connect();
+    } else {
+        gpio_on_disconnect();
+    }
+
     if (config.body.disable_pico_led) {
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
     }else {
@@ -184,6 +203,15 @@ void set_config(const uint8_t *new_config, const uint16_t len) {
 }
 
 void set_config(const Config_body &new_config) {
+    const bool controller_connected = bt_is_connected();
+    gpio_on_disconnect();
+
     config.body = new_config;
     config_valid();
+
+    if (controller_connected && config.body.status_gpio_mode != STATUS_GPIO_MODE_BUTTON) {
+        gpio_on_connect();
+    } else {
+        gpio_on_disconnect();
+    }
 }

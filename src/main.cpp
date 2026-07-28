@@ -11,6 +11,7 @@
 #include "utils.h"
 #include "resample.h"
 #include "audio.h"
+#include "btstack_util.h"
 #if ENABLE_DEBUG
 #include "debug.h"
 #endif
@@ -28,6 +29,7 @@
 #include "config.h"
 #include "cmd.h"
 #include "dse.h"
+#include "status_gpio.h"
 #if ENABLE_BATT_LED
 #include "battery_led.h"
 #endif
@@ -203,10 +205,10 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
 
     std::vector<uint8_t> feature_data = get_feature_data(report_id, reqlen);
     if (!feature_data.empty()) {
-        memcpy(buffer, feature_data.data() + 1, feature_data.size() - 1);
+        memcpy(buffer, feature_data.data(), feature_data.size());
     }
 
-    return feature_data.empty() ? 0 : feature_data.size() - 1;
+    return feature_data.empty() ? 0 : feature_data.size();
 }
 
 bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
@@ -285,6 +287,9 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
 
                 memcpy(outputData + 3, &state, sizeof(SetStateData));
                 bt_write(outputData, sizeof(outputData));
+#ifdef ENABLE_VERBOSE
+                printf_hexdump(outputData,sizeof(outputData));
+#endif
                 break;
             }
         }
@@ -318,6 +323,10 @@ int main() {
     board_init_after_tusb();
 #if ENABLE_SERIAL
     stdio_usb_init();
+    while (!stdio_usb_connected()) {
+        tud_task();
+    }
+    sleep_ms(150);
 #endif
 
     if (cyw43_arch_init()) {
@@ -353,6 +362,7 @@ int main() {
     wake_init();
 
     config_load();
+    gpio_on_disconnect();
 
     bt_init();
     bt_register_data_callback(on_bt_data);

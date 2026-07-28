@@ -52,7 +52,7 @@ on:
 
 env:
   PICO_SDK_REF: 2.3.0
-  TINYUSB_REF: 0.21.0
+  TINYUSB_REF: 2d56dc533e45e4e91b15e93fdab5e22e964f328d
   PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
   ARM_TOOLCHAIN_VERSION: 15.2.rel1
   ARM_TOOLCHAIN_URL: https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/15.2.rel1/arm-gnu-toolchain-15.2.rel1-x86_64-arm-none-eabi.tar.xz
@@ -245,12 +245,15 @@ jobs:
           git clone --depth 1 --branch "$PICO_SDK_REF" https://github.com/raspberrypi/pico-sdk.git "$PICO_SDK_PATH"
           git -C "$PICO_SDK_PATH" submodule update --init --recursive
 
-      - name: Switch TinyUSB to configured tag
+      - name: Switch TinyUSB to configured ref
         run: |
-          if ! git -C "$PICO_SDK_PATH/lib/tinyusb" rev-parse -q --verify "refs/tags/$TINYUSB_REF" >/dev/null; then
-            git -C "$PICO_SDK_PATH/lib/tinyusb" fetch --depth 1 origin "refs/tags/$TINYUSB_REF:refs/tags/$TINYUSB_REF"
+          if git -C "$PICO_SDK_PATH/lib/tinyusb" rev-parse -q --verify "$TINYUSB_REF^{commit}" >/dev/null; then
+            TINYUSB_TARGET="$TINYUSB_REF"
+          else
+            git -C "$PICO_SDK_PATH/lib/tinyusb" fetch --depth 1 origin "$TINYUSB_REF"
+            TINYUSB_TARGET=FETCH_HEAD
           fi
-          git -C "$PICO_SDK_PATH/lib/tinyusb" checkout --detach "$TINYUSB_REF"
+          git -C "$PICO_SDK_PATH/lib/tinyusb" checkout --detach "$TINYUSB_TARGET"
 
       - name: Build ${{ matrix.name }}
         shell: bash
