@@ -287,7 +287,7 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
 
                 memcpy(outputData + 3, &state, sizeof(SetStateData));
                 bt_write(outputData, sizeof(outputData));
-#ifdef ENABLE_VERBOSE
+#if ENABLE_VERBOSE
                 printf_hexdump(outputData,sizeof(outputData));
 #endif
                 break;
