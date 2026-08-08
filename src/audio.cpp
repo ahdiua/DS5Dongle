@@ -314,10 +314,8 @@ void __not_in_flash_func(audio_loop)() {
         }
 #endif
 
-        in_buf[i * 2] = static_cast<WDL_ResampleSample>(clamp(raw[i * INPUT_CHANNELS + 2] / 32768.0f * haptics_gain,
-                                                              -1.0f, 1.0f));
-        in_buf[i * 2 + 1] = static_cast<WDL_ResampleSample>(clamp(raw[i * INPUT_CHANNELS + 3] / 32768.0f * haptics_gain,
-                                                                  -1.0f, 1.0f));
+        in_buf[i * 2] = raw[i * INPUT_CHANNELS + 2]  / 32768.0f;
+        in_buf[i * 2 + 1] = raw[i * INPUT_CHANNELS + 3]  / 32768.0f;
     }
 
     // 3. 48kHz -> 3kHz 重采样
@@ -329,10 +327,10 @@ void __not_in_flash_func(audio_loop)() {
 
     // 4. 转换为int8并缓冲，满64字节即组包发送
     for (int i = 0; i < out_frames; i++) {
-        int val_l = static_cast<int>(out_buf[i * 2] * 127.0f);
-        int val_r = static_cast<int>(out_buf[i * 2 + 1] * 127.0f);
-        haptic_buf[haptic_buf_pos++] = (int8_t) clamp(val_l, -128, 127); // 似乎clamp有点多余？还是以防万一吧
-        haptic_buf[haptic_buf_pos++] = (int8_t) clamp(val_r, -128, 127);
+        int val_l = static_cast<int>(out_buf[i * 2] * 127.0f * haptics_gain);
+        int val_r = static_cast<int>(out_buf[i * 2 + 1] * 127.0f * haptics_gain);
+        haptic_buf[haptic_buf_pos++] = static_cast<int8_t>(clamp(val_l, -128, 127));
+        haptic_buf[haptic_buf_pos++] = static_cast<int8_t>(clamp(val_r, -128, 127));
 
         if (haptic_buf_pos != SAMPLE_SIZE) {
             continue;

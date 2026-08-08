@@ -8,6 +8,7 @@
 #include <queue>
 #include <unordered_map>
 #include <vector>
+#include "audio.h"
 #include "btstack_event.h"
 #include "btstack_tlv.h"
 #include "gap.h"
@@ -760,6 +761,13 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                         .LedBlue = 0x00,
                     };
                     update_state(state);
+
+                    // Re-arm controller mic streaming for the new link. The 0x32
+                    // mic-status packet is otherwise only sent when the host opens
+                    // or closes the USB mic interface, so a controller that
+                    // reconnects while the host still holds that interface open
+                    // never gets told to stream and the mic stays silent.
+                    update_mic_status();
 
                     const auto mtu = l2cap_get_remote_mtu_for_local_cid(hid_interrupt_cid);
                     printf("[L2CAP] Remote Interrupt MTU: %d\n", mtu);
