@@ -12,12 +12,13 @@
 #include "utils.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
+#include "pico/btstack_flash_bank.h"
 #include "pico/cyw43_arch.h"
 #include "pico/flash.h"
 
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 constexpr uint16_t CONFIG_VERSION = 5; // 如果想要强制重置配置，再更新 CONFIG_VERSION。
-constexpr uint32_t CONFIG_FLASH_OFFSET = PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE;
+constexpr uint32_t CONFIG_FLASH_OFFSET = PICO_FLASH_BANK_STORAGE_OFFSET - FLASH_SECTOR_SIZE;
 static Config config{};
 bool is_dse = false;
 
@@ -27,19 +28,35 @@ static_assert(sizeof(Config) <= FLASH_PAGE_SIZE);
 // 配置区起始地址必须按 flash sector 对齐。
 static_assert(CONFIG_FLASH_OFFSET % FLASH_SECTOR_SIZE == 0);
 
-uint32_t calc_config_crc(const Config &con) {
+static uint32_t calc_config_crc(const Config &con) {
     return crc32(reinterpret_cast<const uint8_t *>(&con.body), sizeof(Config_body));
 }
 
-const Config *flash_config() {
-    return reinterpret_cast<const Config *>(XIP_BASE + CONFIG_FLASH_OFFSET);
+static const Config *get_xip_addr(uint32_t offset) {
+    return reinterpret_cast<const Config *>(XIP_BASE + offset);
+}
+
+static bool load_old_config() {
+    const auto old_addr = get_xip_addr(PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE);
+    uint32_t magic_header;
+    memcpy(&magic_header, old_addr, sizeof(uint32_t));
+    if (magic_header == CONFIG_MAGIC) {
+        printf("[Config] Trying load old sector config\n");
+        memset(&config, 0xFF, sizeof(Config)); // 先进行 0xFF 填充，确保后续缺项能够正常初始化
+        memcpy(&config, old_addr, sizeof(Config));
+        printf("[Config] Old Config loaded\n");
+        return true;
+    }
+    return false;
 }
 
 void config_valid() {
     // valid config and set default value
     if (config.magic != CONFIG_MAGIC) {
-        config.magic = CONFIG_MAGIC;
-        printf("[Config] Config Magic Header is invalid\n");
+        if (!load_old_config()) {
+            config.magic = CONFIG_MAGIC;
+            printf("[Config] Config Magic Header is invalid\n");
+        }
     }
     if (config.size != sizeof(Config_body)) {
         config.size = sizeof(Config_body);
@@ -80,7 +97,7 @@ void config_valid() {
         printf("[Config] polling_rate_mode is invalid\n");
     }
     if (body->audio_buffer_length < 16 || body->audio_buffer_length > 128) {
-        body->audio_buffer_length = 64;
+        body->audio_buffer_length = 48;
         printf("[Config] haptics_buffer_length is invalid\n");
     }
     if (body->controller_mode > 2) {
@@ -126,7 +143,7 @@ void config_valid() {
 }
 
 void config_load() {
-    memcpy(&config, flash_config(), sizeof(Config));
+    memcpy(&config, get_xip_addr(CONFIG_FLASH_OFFSET), sizeof(Config));
 
     config_valid();
 }
@@ -135,7 +152,7 @@ void config_load() {
 // neither core touches XIP flash while the sector is erased/programmed. Without
 // the core1 park this races the audio core and corrupts audio (buzzing).
 static void config_save_flash_op(void *param) {
-    const uint8_t *page = static_cast<const uint8_t *>(param);
+    const auto *page = static_cast<const uint8_t *>(param);
     const uint32_t interrupts = save_and_disable_interrupts();
     flash_range_erase(CONFIG_FLASH_OFFSET, FLASH_SECTOR_SIZE);
     flash_range_program(CONFIG_FLASH_OFFSET, page, FLASH_PAGE_SIZE);
@@ -155,7 +172,7 @@ bool config_save() {
     }
 
     Config verify{};
-    memcpy(&verify, flash_config(), sizeof(verify));
+    memcpy(&verify, get_xip_addr(CONFIG_FLASH_OFFSET), sizeof(verify));
     const auto verify_crc32 = calc_config_crc(verify);
     if (verify_crc32 == config.crc32) {
         printf("[Config] Config write flash verify success\n");

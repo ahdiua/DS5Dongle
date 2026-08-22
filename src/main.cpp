@@ -335,6 +335,10 @@ int main() {
     }
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
 
+#ifdef CYW43_WL_GPIO_SMPS_PIN
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_SMPS_PIN, true);
+#endif
+
 #if ENABLE_BATT_LED
     battery_led_init();
 #endif
