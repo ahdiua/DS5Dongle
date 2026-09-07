@@ -27,6 +27,11 @@ constexpr uint16_t XINPUT_B              = 0x2000;
 constexpr uint16_t XINPUT_X              = 0x4000;
 constexpr uint16_t XINPUT_Y              = 0x8000;
 
+constexpr uint8_t XUSB_GET_REPORT = 0x01;
+constexpr uint8_t XUSB_SET_REPORT = 0x09;
+constexpr uint8_t XUSB_REPORT_TYPE_INPUT = 0x01;
+constexpr uint8_t XUSB_REPORT_TYPE_OUTPUT = 0x02;
+
 struct __attribute__((packed)) XInputReport {
     uint8_t report_id;
     uint8_t report_size;
@@ -69,6 +74,11 @@ alignas(4) XInputReport tx_report{.report_id = 0x00,
 critical_section_t report_cs;
 bool report_dirty = false;
 alignas(4) uint8_t out_buffer[32]{};
+alignas(4) uint8_t control_buffer[32]{};
+alignas(4) XInputReport control_input_report{
+    .report_id = 0x00,
+    .report_size = sizeof(XInputReport),
+};
 uint8_t endpoint_in = 0;
 uint8_t endpoint_out = 0;
 uint8_t device_rhport = 0;
@@ -132,6 +142,18 @@ void apply_player_led(uint8_t animation) {
     state.PlayerLight4 = (indicators >> 3) & 0x01;
     state.PlayerLight5 = (indicators >> 4) & 0x01;
     update_state(state);
+}
+
+void handle_output_report(const uint8_t *buffer, uint16_t len) {
+    if (buffer == nullptr) return;
+
+    if (len >= 5 && buffer[0] == 0x00 && buffer[1] == 0x08) {
+        // Wired Xbox 360 output: byte 3 = large/left motor,
+        // byte 4 = small/right motor.
+        apply_rumble(buffer[3], buffer[4]);
+    } else if (len >= 3 && buffer[0] == 0x01 && buffer[1] == 0x03) {
+        apply_player_led(buffer[2]);
+    }
 }
 
 bool endpoint_xfer(uint8_t rhport, uint8_t endpoint, uint8_t *buffer,
@@ -217,25 +239,57 @@ uint16_t driver_open(uint8_t rhport, tusb_desc_interface_t const *itf_desc,
 
 bool driver_control_xfer(uint8_t rhport, uint8_t stage,
                          tusb_control_request_t const *request) {
-    (void) rhport;
-    (void) stage;
-    (void) request;
-    return false;
+    if (request->bmRequestType_bit.type != TUSB_REQ_TYPE_CLASS ||
+        request->bmRequestType_bit.recipient != TUSB_REQ_RCPT_INTERFACE ||
+        tu_u16_low(request->wIndex) != 0) {
+        return false;
+    }
+
+    const uint8_t report_type = tu_u16_high(request->wValue);
+    const uint8_t report_id = tu_u16_low(request->wValue);
+
+    switch (request->bRequest) {
+        case XUSB_GET_REPORT:
+            if (report_type != XUSB_REPORT_TYPE_INPUT || report_id != 0x00) {
+                return false;
+            }
+            if (stage == CONTROL_STAGE_SETUP) {
+                // EP0 owns this snapshot until the asynchronous control transfer
+                // finishes, so do not expose latest_report directly.
+                critical_section_enter_blocking(&report_cs);
+                control_input_report = latest_report;
+                critical_section_exit(&report_cs);
+                return tud_control_xfer(rhport, request, &control_input_report,
+                                        sizeof(control_input_report));
+            }
+            return true;
+
+        case XUSB_SET_REPORT:
+            if (report_type != XUSB_REPORT_TYPE_OUTPUT ||
+                request->wLength == 0 ||
+                request->wLength > sizeof(control_buffer)) {
+                return false;
+            }
+            if (stage == CONTROL_STAGE_SETUP) {
+                memset(control_buffer, 0, sizeof(control_buffer));
+                return tud_control_xfer(rhport, request, control_buffer,
+                                        request->wLength);
+            }
+            if (stage == CONTROL_STAGE_ACK) {
+                handle_output_report(control_buffer, request->wLength);
+            }
+            return true;
+
+        default:
+            return false;
+    }
 }
 
 bool driver_xfer(uint8_t rhport, uint8_t ep_addr, xfer_result_t result,
                  uint32_t transferred) {
     if (ep_addr == endpoint_out) {
         if (result == XFER_RESULT_SUCCESS) {
-            if (transferred >= 5 && out_buffer[0] == 0x00 &&
-                out_buffer[1] == 0x08) {
-                // Wired Xbox 360 output: byte 3 = large/left motor,
-                // byte 4 = small/right motor.
-                apply_rumble(out_buffer[3], out_buffer[4]);
-            } else if (transferred >= 3 && out_buffer[0] == 0x01 &&
-                       out_buffer[1] == 0x03) {
-                apply_player_led(out_buffer[2]);
-            }
+            handle_output_report(out_buffer, transferred);
         }
         memset(out_buffer, 0, sizeof(out_buffer));
         return arm_out_endpoint();

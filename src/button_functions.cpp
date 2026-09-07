@@ -171,9 +171,8 @@ void button_feedback_tick() {
         mode_flash_last_toggle_ms = now;
         mode_flash_led_state = !mode_flash_led_state;
         mode_flash_toggles_remaining--;
+        // The Pico W LED is attached to the CYW43. Only touch the shared
+        // wireless-chip bus when the visible state actually changes.
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, mode_flash_led_state);
     }
-    // The ordinary Bluetooth LED task runs immediately before this one. Write
-    // the feedback state every loop so a solid-connected LED cannot mask the
-    // off half of the pattern.
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, mode_flash_led_state);
 }
