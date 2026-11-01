@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PICO_SDK_VERSION="2.3.0"
-TINYUSB_VERSION="0.21.0"
+PICO_SDK_VERSION="2.3.1"
+# TinyUSB master past 0.21.0. Pico SDK 2.3.1 still records 0.18.0 in its
+# submodule, so this is a commit rather than a tag (fetched explicitly below).
+TINYUSB_VERSION="98741b55959564746998d0453c32d87064629d7c"
 BUILD_TYPE="Release"
 BUILD_DIR="build/wake"
 ENABLE_WAKE_HID="ON"
@@ -205,7 +207,12 @@ git -C "$TINYUSB_DIR" rev-parse --git-dir >/dev/null 2>&1 || die "TinyUSB submod
 
 echo "Preparing TinyUSB $TINYUSB_VERSION..."
 git -C "$TINYUSB_DIR" fetch --tags
-git -C "$TINYUSB_DIR" checkout "$TINYUSB_VERSION"
+# The pin is a commit, so it needs an explicit fetch the first time; a plain
+# "fetch --tags" only brings tags into a submodule clone like this one.
+if ! git -C "$TINYUSB_DIR" rev-parse -q --verify "$TINYUSB_VERSION^{commit}" >/dev/null; then
+  git -C "$TINYUSB_DIR" fetch --depth 1 origin "$TINYUSB_VERSION"
+fi
+git -C "$TINYUSB_DIR" checkout --detach "$TINYUSB_VERSION"
 git -C "$TINYUSB_DIR" submodule update --init --recursive
 
 if [[ "$CLEAN_BUILD" == "ON" ]]; then

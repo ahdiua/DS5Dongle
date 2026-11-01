@@ -51,8 +51,8 @@ on:
         default: false
 
 env:
-  PICO_SDK_REF: 2.3.0
-  TINYUSB_REF: 2d56dc533e45e4e91b15e93fdab5e22e964f328d
+  PICO_SDK_REF: 2.3.1
+  TINYUSB_REF: 98741b55959564746998d0453c32d87064629d7c
   PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
   ARM_TOOLCHAIN_VERSION: 15.2.rel1
   ARM_TOOLCHAIN_URL: https://gitlab.arm.com/api/v4/projects/tooling%2Fgnu-toolchains-for-arm/packages/generic/gnu-toolchain/15.2.rel1/arm-gnu-toolchain-15.2.rel1-x86_64-arm-none-eabi.tar.xz

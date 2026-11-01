@@ -8,6 +8,8 @@
 #include <cstring>
 
 #include "bt.h"
+#include "button_shortcut.h"
+#include "button_utils.h"
 #include "status_gpio.h"
 #include "utils.h"
 #include "hardware/flash.h"
@@ -19,21 +21,23 @@
 constexpr uint32_t CONFIG_MAGIC = 0x66ccff00;
 constexpr uint16_t CONFIG_VERSION = 5; // 如果想要强制重置配置，再更新 CONFIG_VERSION。
 constexpr uint32_t CONFIG_FLASH_OFFSET = PICO_FLASH_BANK_STORAGE_OFFSET - FLASH_SECTOR_SIZE;
-static Config config{};
+static ConfigStorage storage{};
+static Config &config = storage.config;
 bool is_dse = false;
 
 // 编译期保护
-// 判断Config结构体是否能放进flash 256bytes
-static_assert(sizeof(Config) <= FLASH_PAGE_SIZE);
+// 判断完整配置存储结构是否能放进 flash 256 bytes
+static_assert(sizeof(ConfigStorage) <= FLASH_PAGE_SIZE);
 // 配置区起始地址必须按 flash sector 对齐。
 static_assert(CONFIG_FLASH_OFFSET % FLASH_SECTOR_SIZE == 0);
 
-static uint32_t calc_config_crc(const Config &con) {
-    return crc32(reinterpret_cast<const uint8_t *>(&con.body), sizeof(Config_body));
+static uint32_t calc_config_crc(const ConfigStorage &con) {
+    return crc32(reinterpret_cast<const uint8_t *>(&con.config.body),
+                 sizeof(ConfigStorage) - offsetof(Config, body));
 }
 
-static const Config *get_xip_addr(uint32_t offset) {
-    return reinterpret_cast<const Config *>(XIP_BASE + offset);
+static const ConfigStorage *get_xip_addr(uint32_t offset) {
+    return reinterpret_cast<const ConfigStorage *>(XIP_BASE + offset);
 }
 
 static bool load_old_config() {
@@ -42,8 +46,8 @@ static bool load_old_config() {
     memcpy(&magic_header, old_addr, sizeof(uint32_t));
     if (magic_header == CONFIG_MAGIC) {
         printf("[Config] Trying load old sector config\n");
-        memset(&config, 0xFF, sizeof(Config)); // 先进行 0xFF 填充，确保后续缺项能够正常初始化
-        memcpy(&config, old_addr, sizeof(Config));
+        memset(&storage, 0xFF, sizeof(storage)); // 先进行 0xFF 填充，确保后续缺项能够正常初始化
+        memcpy(&storage, old_addr, sizeof(storage));
         printf("[Config] Old Config loaded\n");
         return true;
     }
@@ -92,7 +96,7 @@ void config_valid() {
         body->disable_pico_led = 0;
         printf("[Config] disable_pico_led is invalid\n");
     }
-    if (body->polling_rate_mode > 2) {
+    if (body->polling_rate_mode > 3) {
         body->polling_rate_mode = 1;
         printf("[Config] polling_rate_mode is invalid\n");
     }
@@ -108,9 +112,9 @@ void config_valid() {
         body->enable_usb_sn = 0;
         printf("[Config] Warning: enable_usb_sn is invalid\n");
     }
-    if (body->ps_shortcut_enabled > 1) {
-        body->ps_shortcut_enabled = 0;
-        printf("[Config] ps_shortcut_enabled is invalid\n");
+    if (body->enable_keyboard > 1) {
+        body->enable_keyboard = 0;
+        printf("[Config] enable_keyboard is invalid\n");
     }
     if (body->mic_select > 3) {
         body->mic_select = 0;
@@ -140,10 +144,56 @@ void config_valid() {
         body->status_gpio_mode = 0;
         printf("[Config] status_gpio_mode is invalid\n");
     }
+    if (body->packet_mode > 1) {
+        body->packet_mode = 0;
+        printf("[Config] packet_mode is invalid\n");
+    }
+    if (body->disconnect_on_dock > 1) {
+        body->disconnect_on_dock = 0;
+        printf("[Config] disconnect_on_dock is invalid\n");
+    }
+    button_remap_valid();
+    shortcut_valid();
+}
+
+void button_remap_valid() {
+    for (uint8_t i = 0; i < BUTTON_REMAP_COUNT; i++) {
+        if (storage.button.button_remap[i] > Disable) {
+            printf("[Config] Button remap value is invalid %u\n", storage.button.button_remap[i]);
+            storage.button.button_remap[i] = i;
+        }
+    }
+}
+
+void shortcut_valid() {
+    for (auto &shortcut : storage.button.shortcuts) {
+        if (!shortcut_slot_valid(shortcut)) {
+            // Slot enablement is represented only by trigger_a; normalize every
+            // invalid or disabled slot to one deterministic byte representation.
+            shortcut.trigger_a = BUTTON_SHORTCUT_DISABLED;
+            shortcut.trigger_b = BUTTON_SHORTCUT_DISABLED;
+            shortcut.action = ShortcutActionKeyboard;
+            shortcut.flags = 0;
+            memset(shortcut.payload, 0, sizeof(shortcut.payload));
+            continue;
+        }
+        switch (shortcut.action) {
+            case ShortcutActionKeyboard:
+                shortcut.keyboard.reserved = 0;
+                break;
+            case ShortcutActionConsumer:
+                shortcut.consumer.reserved = 0;
+                break;
+            default:
+                // Firmware actions do not consume the payload bytes.
+                memset(shortcut.payload, 0, sizeof(shortcut.payload));
+                break;
+        }
+    }
 }
 
 void config_load() {
-    memcpy(&config, get_xip_addr(CONFIG_FLASH_OFFSET), sizeof(Config));
+    memcpy(&storage, get_xip_addr(CONFIG_FLASH_OFFSET), sizeof(storage));
 
     config_valid();
 }
@@ -160,10 +210,10 @@ static void config_save_flash_op(void *param) {
 }
 
 bool config_save() {
-    config.crc32 = calc_config_crc(config);
+    config.crc32 = calc_config_crc(storage);
     alignas(4) uint8_t page[FLASH_PAGE_SIZE];
     memset(page, 0xff, sizeof(page));
-    memcpy(page, &config, sizeof(Config));
+    memcpy(page, &storage, sizeof(storage));
 
     const int rc = flash_safe_execute(config_save_flash_op, page, 1000);
     if (rc != PICO_OK) {
@@ -171,7 +221,7 @@ bool config_save() {
         return false;
     }
 
-    Config verify{};
+    ConfigStorage verify{};
     memcpy(&verify, get_xip_addr(CONFIG_FLASH_OFFSET), sizeof(verify));
     const auto verify_crc32 = calc_config_crc(verify);
     if (verify_crc32 == config.crc32) {
@@ -184,6 +234,24 @@ bool config_save() {
 
 Config_body& get_config() {
     return config.body;
+}
+
+Button& get_button() {
+    return storage.button;
+}
+
+void set_button_remap(const uint8_t *new_remap, const uint16_t len) {
+    const auto copy_len = len < BUTTON_REMAP_COUNT ? len : BUTTON_REMAP_COUNT;
+    memcpy(storage.button.button_remap, new_remap, copy_len);
+    button_remap_valid();
+}
+
+void set_shortcut(const uint8_t *new_shortcuts, const uint16_t len) {
+    button_shortcut_reset();
+    constexpr auto room = sizeof(Button::shortcuts);
+    const auto copy_len = len < room ? len : room;
+    memcpy(storage.button.shortcuts, new_shortcuts, copy_len);
+    shortcut_valid();
 }
 
 void set_config(const uint8_t *new_config, const uint16_t len) {
@@ -216,6 +284,7 @@ void set_config(const uint8_t *new_config, const uint16_t len) {
     }
     state.AllowAudioControl = 1;
     state.MicSelect = config.body.mic_select;
+    state.NoiseCancelEnable = 1;
     update_state(state);
 }
 

@@ -131,13 +131,22 @@ DS5Dongle 克隆中有未提交文件，脚本会拒绝删除，只有确认要�
 
 ### 其他平台
 
-手动构建需要 Pico SDK 2.3.0，并将 SDK 内的 TinyUSB 子模块切换到 0.21.0。然后运行：
+需要 Pico SDK **2.3.1**，并把 SDK 里的 TinyUSB 子模块切换到 `98741b55`（SDK 自带的子模块仍指向 0.18.0，版本太旧）：
+
+```sh
+git -C <sdk>/lib/tinyusb fetch --depth 1 origin 98741b55959564746998d0453c32d87064629d7c
+git -C <sdk>/lib/tinyusb checkout --detach 98741b55959564746998d0453c32d87064629d7c
+```
+
+然后初始化本仓库的子模块并编译：
 
 ```sh
 git submodule update --init --recursive
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPICO_SDK_PATH=<sdk路径>
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPICO_SDK_PATH=<sdk>
 cmake --build build --target ds5-bridge
 ```
+
+Windows 下可直接运行 `tools\build-windows.ps1`，macOS 下运行 `tools/build-macos.sh`——两个脚本都会自动准备上述版本的 SDK 与 TinyUSB。
 
 # 致谢
  - [rafaelvaloto/Pico_W-Dualsense](https://github.com/rafaelvaloto/Pico_W-Dualsense) - 灵感来源

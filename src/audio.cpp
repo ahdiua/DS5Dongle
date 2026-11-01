@@ -30,8 +30,12 @@
 #define OUTPUT_CHANNELS   2
 #define SAMPLE_SIZE       64
 #define SPEAKER_OPUS_SIZE 200
-#define REPORT_SIZE       547
-#define REPORT_ID         0x39
+#define REPORT_ID_SINGLE  0x36
+#define REPORT_SIZE_SINGLE 398
+#define REPORT_ID_DOUBLE  0x39
+#define REPORT_SIZE_DOUBLE 547
+#define REPORT_ID_HAPTICS_ONLY 0x32
+#define REPORT_SIZE_HAPTICS_ONLY 142
 // #define VOLUME_GAIN       2
 // #define BUFFER_LENGTH     48
 #define MIC_CHANNELS      1
@@ -100,78 +104,168 @@ void update_mic_status() {
     bt_write(pkt, sizeof(pkt));
 }
 
-void __not_in_flash_func(audio_bt_task)() {
+// Single-packet audio report (the v0.7.2 layout without its SetStateData
+// block): one haptics frame followed by one Opus speaker frame.
+// `haptics` holds SAMPLE_SIZE bytes, `speaker` SPEAKER_OPUS_SIZE bytes.
+static void __not_in_flash_func(audio_send_single)(const uint8_t *haptics, const uint8_t *speaker) {
     const Config_body &cfg = get_config();
     const bool mic_enabled = mic_active && cfg.mic_select != 3;
-#if !DISABLE_SPEAKER_PROC
-    const bool speaker_enabled = cfg.speaker_select != 3;
-#endif
 
-    if (queue_get_level(&haptics_fifo) < 2) {
-        return;
-    }
-#if !DISABLE_SPEAKER_PROC
-    if (speaker_enabled && queue_get_level(&audio_spk_fifo) < 2) {
-        return;
-    }
-#endif
-
-    uint8_t pkt[REPORT_SIZE]{};
-    pkt[0] = REPORT_ID;
+    uint8_t pkt[REPORT_SIZE_SINGLE]{};
+    pkt[0] = REPORT_ID_SINGLE;
     pkt[1] = reportSeqCounter << 4;
     reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
     pkt[2] = 0x11 | 0 << 6 | 1 << 7;
+    // pkt[3] 是 pkt[4] 中置 1 的位数。bit 6 是必须的且不占用后面的字节，
+    // 其余每多置 1 位，就在下面多放一个字节。最终实测可以只保留一个
+    // buf_len + packetCounter，这里沿用 v0.7.2 的 5 个 buf_len。
+    pkt[3] = 7;
+    pkt[4] = mic_enabled ? 0b11111111 : 0b11111110; // bit0: 手柄麦克风
+    const auto buf_len = cfg.audio_buffer_length;
+    pkt[5] = buf_len; // VolumeHeadphones - guess but no work
+    pkt[6] = buf_len; // VolumeMic - guess but no work
+    pkt[7] = buf_len; // VolumeSpeaker - guess but no work
+    pkt[8] = buf_len; // AudioBufferLength
+    pkt[9] = buf_len; // AudioBufferLength
+    pkt[10] = packetCounter++;
+
+    // Haptics Audio Data（单帧）：2 字节块头 + SAMPLE_SIZE 字节数据。
+    // v0.7.2 里它前面还有一个 0x10 SetStateData 块（2+63 字节），现在 state
+    // 走独立的 0x31 报文，所以整包前移到 pkt[11]（若以后要重新内嵌 state，
+    // 需要在这里插回 0x90 块，并把后面的偏移整体 +65）。
+    pkt[11] = 0x12 | 0 << 6 | 1 << 7;
+    pkt[12] = SAMPLE_SIZE;
+    memcpy(pkt + 13, haptics, SAMPLE_SIZE);
+
+#if !DISABLE_SPEAKER_PROC
+    if (cfg.speaker_select != 3) {
+        pkt[77] = ((
+            cfg.speaker_select == 2 || // lock headphone
+            (cfg.speaker_select == 0 && plug_headset) // auto
+            ) ? 0x16 : 0x13) | 0 << 6 | 1 << 7;
+        pkt[78] = SPEAKER_OPUS_SIZE;
+        memcpy(pkt + 79, speaker, SPEAKER_OPUS_SIZE);
+    }
+#endif
+    bt_write(pkt, sizeof(pkt));
+}
+
+// Double-packet audio report: two haptics frames and two Opus speaker frames in
+// one 0x39 report. `haptics` holds 2 * SAMPLE_SIZE bytes, `speaker`
+// 2 * SPEAKER_OPUS_SIZE bytes (the two frames are contiguous).
+static void __not_in_flash_func(audio_send_double)(const uint8_t *haptics, const uint8_t *speaker) {
+    const Config_body &cfg = get_config();
+    const bool mic_enabled = mic_active && cfg.mic_select != 3;
+
+    uint8_t pkt[REPORT_SIZE_DOUBLE]{};
+    pkt[0] = REPORT_ID_DOUBLE;
+    pkt[1] = reportSeqCounter << 4;
+    reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
+    pkt[2] = 0x11 | 0 << 6 | 1 << 7;
+    // 见 audio_send_single 里对 pkt[3]/pkt[4] 的说明。双包模式只保留
+    // 4 个 buf_len，因此 bit7 置 0、pkt[3] 减 1。
     pkt[3] = 6;
-    pkt[4] = mic_enabled ? 0b01111111 : 0b01111110;
-    // byte 4 研究
-    // bit 6 是必须的
-    // 其余 bit 每多设置一个为0，就需要将pkt[3] - 1，然后将下面这些缩短一个字节的数据。
-    // 最终实测，可以只保留一个 buf_len + packetCounter
-    // pkt 5-7 的注释是根据 Nielk1 采样到的数据进行猜测。但是实际上修改还是发现有任何效果
+    pkt[4] = mic_enabled ? 0b01111111 : 0b01111110; // bit0: 手柄麦克风
     const auto buf_len = cfg.audio_buffer_length;
     pkt[5] = buf_len; // VolumeHeadphones - guess but no work
     pkt[6] = buf_len; // VolumeMic - guess but no work
     pkt[7] = buf_len; // VolumeSpeaker - guess but no work
     pkt[8] = buf_len; // AudioBufferLength
     pkt[9] = packetCounter += 2;
+
+    // Haptics Audio Data（双帧）：块头 bit6 置 1 表示这一块带两帧数据，
+    // 长度字节仍然是一帧的大小。
     pkt[10] = 0x12 | 1 << 6 | 1 << 7;
     pkt[11] = SAMPLE_SIZE;
-    static haptics_element haptics_pb{};
-    if (queue_get_level(&haptics_fifo) >= 2) {
-        if (queue_try_remove(&haptics_fifo, &haptics_pb)) {
-            memcpy(pkt + 12, haptics_pb.data,SAMPLE_SIZE);
-        } else {
-            printf("[Audio] Warning: Haptics queue remove failed\n");
-        }
-        if (queue_try_remove(&haptics_fifo, &haptics_pb)) {
-            memcpy(pkt + 12 + SAMPLE_SIZE, haptics_pb.data,SAMPLE_SIZE);
-        } else {
-            printf("[Audio] Warning: Haptics queue remove failed\n");
-        }
-    }
+    memcpy(pkt + 12, haptics, 2 * SAMPLE_SIZE);
+
 #if !DISABLE_SPEAKER_PROC
-    if (speaker_enabled) {
+    if (cfg.speaker_select != 3) {
         pkt[140] = ((
             cfg.speaker_select == 2 || // lock headphone
             (cfg.speaker_select == 0 && plug_headset) // auto
             ) ? 0x16 : 0x13) | 1 << 6 | 1 << 7;
         pkt[141] = SPEAKER_OPUS_SIZE;
-        static audio_spk_element spk_pb{};
-        if (queue_get_level(&audio_spk_fifo) >= 2) {
-            if (queue_try_remove(&audio_spk_fifo, &spk_pb)) {
-                memcpy(pkt + 142, spk_pb.data,SPEAKER_OPUS_SIZE);
-            } else {
-                printf("[Audio] Warning: Speaker queue remove failed\n");
-            }
-            if (queue_try_remove(&audio_spk_fifo, &spk_pb)) {
-                memcpy(pkt + 142 + SPEAKER_OPUS_SIZE, spk_pb.data,SPEAKER_OPUS_SIZE);
-            } else {
-                printf("[Audio] Warning: Speaker queue remove failed\n");
-            }
-        }
+        memcpy(pkt + 142, speaker, 2 * SPEAKER_OPUS_SIZE);
     }
 #endif
     bt_write(pkt, sizeof(pkt));
+}
+
+static void __not_in_flash_func(audio_send_haptics_only)(const uint8_t *haptics, const bool double_frame) {
+    const Config_body &cfg = get_config();
+    const bool mic_enabled = mic_active && cfg.mic_select != 3;
+    const auto buf_len = cfg.audio_buffer_length;
+
+    uint8_t pkt[REPORT_SIZE_HAPTICS_ONLY]{};
+    pkt[0] = REPORT_ID_HAPTICS_ONLY;
+    pkt[1] = reportSeqCounter << 4;
+    reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
+    pkt[2] = 0x11 | 0 << 6 | 1 << 7;
+    pkt[3] = 4;
+    // bit 5 - buf_len adjust
+    // guess: bit 3 - mic vol?
+    pkt[4] = mic_enabled ? 0b01100111 : 0b01100110; // bit0: 手柄麦克风
+    pkt[5] = buf_len; // AudioBufferLength
+    pkt[6] = buf_len; // AudioBufferLength
+    pkt[7] = packetCounter++;
+    if (double_frame) {
+        packetCounter++;
+    }
+
+    pkt[8] = 0x12 | (double_frame ? 1 : 0) << 6 | 1 << 7;
+    pkt[9] = SAMPLE_SIZE;
+    memcpy(pkt + 10, haptics, SAMPLE_SIZE * (double_frame ? 2 : 1));
+    bt_write(pkt, sizeof(pkt));
+}
+
+void __not_in_flash_func(audio_bt_task)() {
+    const Config_body &cfg = get_config();
+    const bool speaker_enabled = cfg.speaker_select != 3;
+    // packet_mode: 0 = 双包（0x39，一包两帧），1 = 单包（0x36，一包一帧）。
+    // 扬声器禁用时同样遵守单双包模式，只是报文换成 0x32 纯 haptics 报文。
+    const uint8_t frames = cfg.packet_mode == 1 ? 1 : 2;
+
+    // 等够一整包的数据再取，避免把一帧拆到两个报文里
+    if (queue_get_level(&haptics_fifo) < frames) {
+        return;
+    }
+#if !DISABLE_SPEAKER_PROC
+    if (speaker_enabled && queue_get_level(&audio_spk_fifo) < frames) {
+        return;
+    }
+#endif
+
+    // 一次取出整包的数据，帧之间连续存放，发送函数直接按指针读取
+    static uint8_t haptics_pb[2 * SAMPLE_SIZE];
+    for (uint8_t i = 0; i < frames; i++) {
+        if (!queue_try_remove(&haptics_fifo, haptics_pb + i * SAMPLE_SIZE)) {
+            printf("[Audio] Warning: Haptics queue remove failed\n");
+            return;
+        }
+    }
+#if !DISABLE_SPEAKER_PROC
+    static uint8_t speaker_pb[2 * SPEAKER_OPUS_SIZE];
+    if (speaker_enabled) {
+        for (uint8_t i = 0; i < frames; i++) {
+            if (!queue_try_remove(&audio_spk_fifo, speaker_pb + i * SPEAKER_OPUS_SIZE)) {
+                printf("[Audio] Warning: Speaker queue remove failed\n");
+                return;
+            }
+        }
+    }
+    const uint8_t *spk = speaker_pb;
+#else
+    const uint8_t *spk = nullptr;
+#endif
+
+    if (!speaker_enabled) {
+        audio_send_haptics_only(haptics_pb, frames == 2);
+    } else if (frames == 1) {
+        audio_send_single(haptics_pb, spk);
+    } else {
+        audio_send_double(haptics_pb, spk);
+    }
 }
 
 void __not_in_flash_func(audio_loop)() {
@@ -180,34 +274,6 @@ void __not_in_flash_func(audio_loop)() {
     const Config_body &cfg = get_config();
     const bool mic_enabled = mic_active && cfg.mic_select != 3;
     const bool speaker_enabled = cfg.speaker_select != 3;
-
-    /* 
-    // Mic playback: drain decoded mic PCM into the USB IN endpoint
-    static mic_decode_element mic_pb{};
-    if (queue_try_remove(&mic_decode_fifo, &mic_pb)) {
-        if (mic_enabled) {
-            // The controller mic is mono, but the USB descriptor presents a 2-channel
-            // mic (matching the real DS5) so Windows doesn't conflict with its cached
-            // DS5 audio format. Pack each mono int16 sample as L/R in one 32-bit word.
-            static uint32_t mic_stereo[MIC_FRAMES];
-            const int mono_samples = mic_pb.len / 2;
-            for (int i = 0; i < mono_samples; i++) {
-                const uint16_t sample = static_cast<uint16_t>(mic_pb.data[i]);
-                mic_stereo[i] = static_cast<uint32_t>(sample) | (static_cast<uint32_t>(sample) << 16);
-            }
-            const uint16_t stereo_len = (uint16_t) (mono_samples * sizeof(uint32_t));
-            uint16_t written = tud_audio_write(mic_stereo, stereo_len);
-            if (written != stereo_len) {
-                // Gated behind ENABLE_VERBOSE: when the host has not opened the mic
-                // interface (the common case -- most games never do) tud_audio_write
-                // short-writes every frame, so an unconditional log would flood
-                // core0's hot path with the newlib formatting chain.
-#if ENABLE_VERBOSE
-                printf("[Audio] Warning: USB mic FIFO wrote %u/%u bytes\n", written, stereo_len);
-#endif
-            }
-        }
-    */
 
     // --- BUGFIX: HARDWARE-THROTTLED DIRECT SLICE DRAINING ---
     // Slaves the microphone transmission speed to the USB host clock.
@@ -473,7 +539,7 @@ void __not_in_flash_func(core1_entry)() {
     sleep_ms(300);
 
     int error = 0;
-    encoder = opus_encoder_create(48000, 2,OPUS_APPLICATION_AUDIO, &error);
+    encoder = opus_encoder_create(48000, 2,OPUS_APPLICATION_RESTRICTED_CELT, &error);
     if (error != 0) {
         printf("[Audio] OpusEncoder create failed\n");
         return;

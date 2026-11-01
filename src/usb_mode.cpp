@@ -4,8 +4,10 @@
 
 #include "audio.h"
 #include "bt.h"
+#include "config.h"
 #include "pico/time.h"
 #include "tusb.h"
+#include "usb.h"
 #include "wake.h"
 #include "xinput.h"
 
@@ -57,10 +59,11 @@ void usb_gamepad_toggle_mode() {
     reset_to_dualsense_pending = false;
     set_mode(usb_xinput_mode() ? UsbGamepadMode::DualSense
                                : UsbGamepadMode::XInput);
+    usb_keyboard_only = !controller_connected && !usb_xinput_mode() && get_config().enable_wake;
+    usb_reconfiguring = true;
 
-    // Preserve the project's existing behavior: no controller means no USB
-    // gamepad. The Bluetooth connect path will call tud_connect() later.
-    if (controller_connected) {
+    // Without a controller, expose only the native wake keyboard when enabled.
+    if (controller_connected || usb_keyboard_only) {
         tud_connect();
     }
 }
@@ -80,14 +83,14 @@ void usb_gamepad_task() {
     // If Bluetooth already came back while USB was suspended, re-enumerate the
     // connected controller immediately using the native descriptors.
     const bool controller_connected = bt_is_connected();
-    if (controller_connected) {
-        wake_note_usb_reconnect();
-    }
+    wake_note_usb_reconnect();
     tud_disconnect();
     set_mode(UsbGamepadMode::DualSense);
     reset_to_dualsense_pending = false;
+    usb_keyboard_only = !controller_connected && get_config().enable_wake;
+    usb_reconfiguring = true;
 
-    if (controller_connected) {
+    if (controller_connected || usb_keyboard_only) {
         sleep_ms(150);
         tud_connect();
     }

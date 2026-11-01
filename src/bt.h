@@ -17,6 +17,8 @@ typedef void (*bt_data_callback_t)(CHANNEL_TYPE channel, uint8_t *data, uint16_t
 
 struct SetStateData;
 
+extern const uint8_t state_init_data[66];
+
 int bt_init();
 void bt_register_data_callback(bt_data_callback_t callback);
 void bt_send_packet(uint8_t *data, uint16_t len);
@@ -25,8 +27,6 @@ bool bt_disconnect();
 bool bt_is_connected();
 void bt_set_scan_idle();
 void bt_set_scan_active();
-void dse_unlock_task();
-bool bt_dse_profiles_ready();
 void bt_write(const uint8_t *data, uint16_t len);
 
 // Drop queued interrupt-channel output that belongs to the old USB identity.
@@ -34,7 +34,15 @@ void bt_write(const uint8_t *data, uint16_t len);
 // written after this call is guaranteed to have queue capacity.
 void bt_discard_pending_output();
 void bt_get_signal_strength(int8_t *rssi);
-std::vector<uint8_t> get_feature_data(uint8_t reportId,uint16_t len);
+std::vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len);
+
+// Issue a GET_REPORT (0x43 <id>) over the HID control channel and pump the BT
+// stack until the matching 0xA3 response arrives, or until timeout_ms expires.
+// Returns the cached/just-received report body (without the report id byte).
+// Must be called from the main context (e.g. the USB GET_REPORT callback): it
+// drives cyw43_arch_poll() itself and never calls tud_task().
+std::vector<uint8_t> get_feature_data_live(uint8_t reportId, uint16_t timeout_ms);
+
 void init_feature();
 void set_feature_data(uint8_t reportId, uint8_t* data,uint16_t len);
 void bt_inquiring_led();

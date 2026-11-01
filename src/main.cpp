@@ -12,13 +12,13 @@
 #include "resample.h"
 #include "audio.h"
 #include "btstack_util.h"
+#include "button_remap.h"
 #if ENABLE_DEBUG
 #include "debug.h"
 #endif
 #include "wake.h"
-#ifdef ENABLE_WAKE_HID
-#include "ps_shortcut.h"
-#endif
+#include "usb.h"
+#include "button_shortcut.h"
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
 #include "hardware/watchdog.h"
@@ -28,34 +28,21 @@
 #endif
 #include "config.h"
 #include "cmd.h"
-#include "dse.h"
 #include "status_gpio.h"
 #if ENABLE_BATT_LED
 #include "battery_led.h"
 #endif
 
-// Pico SDK speciifically for waiting on conditions
-#include "pico/critical_section.h"
-
 uint8_t reportSeqCounter = 0;
 uint8_t packetCounter = 0;
 bool spk_active = false;
 
-uint8_t interrupt_in_data[63] = {
-    0x7f, 0x7d, 0x7f, 0x7e, 0x00, 0x00, 0xa7,
-    0x08, 0x00, 0x00, 0x00, 0x52, 0x43, 0x30, 0x41,
-    0x01, 0x00, 0x0e, 0x00, 0xef, 0xff, 0x03, 0x03,
-    0x7b, 0x1b, 0x18, 0xf0, 0xcc, 0x9c, 0x60, 0x00,
-    0xfc, 0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00,
-    0x00, 0x00, 0x09, 0x09, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0xa7, 0xad, 0x60, 0x00, 0x29, 0x18, 0x00,
-    0x53, 0x9f, 0x28, 0x35, 0xa5, 0xa8, 0x0c, 0x8b
-};
+USBGetStateData interrupt_in_data{};
 
-critical_section_t report_cs;
-volatile bool report_dirty = false;
+bool report_dirty = false;
 
 void __not_in_flash_func(interrupt_loop)() {
+    if (usb_keyboard_only || usb_reconfiguring) return;
     if (usb_xinput_mode()) {
         xinput_task();
         return;
@@ -63,36 +50,33 @@ void __not_in_flash_func(interrupt_loop)() {
     if (!tud_hid_ready()) return;
 
     // TODO: Refactor for better code reuse
-    if (get_config().polling_rate_mode != 2) {
-        if (!tud_hid_report(0x01, interrupt_in_data, 63)) {
+    if (get_config().polling_rate_mode != 3) {
+        USBGetStateData report = interrupt_in_data;
+        button_remap_apply(report);
+        if (!tud_hid_report(0x01, &report, sizeof(report))) {
             printf("[USBHID] tud_hid_report error\n");
         }
         return;
     }
 
     bool should_send = false;
-    // Local buffer to hold the report data while we prepare it to send. 
-    uint8_t safe_report[63];
+    USBGetStateData report{};
 
-
-    critical_section_enter_blocking(&report_cs);
     if (report_dirty) {
-        memcpy(safe_report, interrupt_in_data, 63);
+        report = interrupt_in_data;
         report_dirty = false;
         should_send = true;
     }
-    critical_section_exit(&report_cs);
 
     // Only send to TinyUSB if we actually grabbed fresh data
     if (should_send) {
-        if (!tud_hid_report(0x01, safe_report, 63)) {
+        button_remap_apply(report);
+        if (!tud_hid_report(0x01, &report, sizeof(report))) {
             printf("[USBHID] tud_hid_report error\n");
 
             // If the report failed to queue, restore the dirty flag 
             // so we try again on the next loop iteration.
-            critical_section_enter_blocking(&report_cs);
             report_dirty = true;
-            critical_section_exit(&report_cs);
         }
     }
 }
@@ -108,11 +92,18 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
             }
             return;
         }
-        if (len < 66) return;
-        if ((data[56] & 1) != (interrupt_in_data[53] & 1)) {
+        // Everything below reads up to data + 3 + sizeof(interrupt_in_data);
+        // a shorter frame would read stale bytes past its end (e.g. a false
+        // dock bit in data[56]).
+        if (len < 3 + sizeof(interrupt_in_data)) {
+            return;
+        }
+        if ((data[56] & 1) != interrupt_in_data.PluggedHeadphones) {
             set_headset(data[56] & 1);
         }
-        if (((data[56] >> 2) & 1) != ((interrupt_in_data[53] >> 2) & 1)) {
+        // Keep MuteLight in sync with the controller's current mute state,
+        // primarily for handling USB Audio mute commands.
+        if (((data[56] >> 2) & 1) != interrupt_in_data.MicMuted) {
             const SetStateData state{
                 .AllowMuteLight = 1,
                 .MuteLightMode = ((data[56] >> 2) & 1) ? MuteLight::On : MuteLight::Off,
@@ -129,42 +120,43 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
             update_state(state);
         }*/
 
+        // Dock: USB power without USB data (a host cable sets both); latch so
+        // one dock event sends one disconnect.
+        static bool dock_latched = false;
+        const bool docked = (data[56] >> 6) & 1;
+        if (!docked) {
+            dock_latched = false;
+        } else if (!dock_latched && get_config().disconnect_on_dock && bt_disconnect()) {
+            dock_latched = true;
+            printf("[BT] Dock detect (status1=0x%02X), disconnect\n", data[56]);
+        }
+
         // Wake-on-PS must observe every BT input report regardless of polling
         // mode: the wake feature has its own state to maintain (button-byte
         // diff for edge detection) and short-circuiting it on non-2 polling
         // modes silently breaks wake while the host is suspended.
         wake_on_bt_input(data + 3, len - 3);
-        #ifdef ENABLE_WAKE_HID
-        ps_shortcut_tick(data + 3, len - 3);
-        #endif
+        memcpy(&interrupt_in_data, data + 3, sizeof(interrupt_in_data));
+        if (!usb_xinput_mode() && !usb_keyboard_only && !usb_reconfiguring) {
+            button_shortcut_tick(interrupt_in_data);
+        }
 
         if (usb_xinput_mode()) {
             xinput_on_dualsense_report(data + 3, len - 3);
-            memcpy(interrupt_in_data, data + 3, sizeof(interrupt_in_data));
 #if ENABLE_BATT_LED
             battery_led_note_report();
 #endif
             return;
         }
 
-        if (get_config().polling_rate_mode != 2) {
-            memcpy(interrupt_in_data, data + 3, 63);
+        if (get_config().polling_rate_mode != 3) {
 #if ENABLE_BATT_LED
             battery_led_note_report();
 #endif
             return;
         }
 
-        // We add the critical section here to avoid any race conditions when writing to the interrupt_in_data buffer,
-        // which is shared between the main loop and this callback.
-        // The critical section ensures that only one thread can access the buffer at a time,
-        // preventing data corruption and ensuring thread safety.
-        // We also set the report_dirty flag to true to indicate that new data is available
-        //  and needs to be sent in the next interrupt report.
-        critical_section_enter_blocking(&report_cs);
-        memcpy(interrupt_in_data, data + 3, 63);
         report_dirty = true;
-        critical_section_exit(&report_cs);
 #if ENABLE_BATT_LED
         battery_led_note_report();
 #endif
@@ -177,7 +169,7 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
 uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer,
                                uint16_t reqlen) {
 #ifdef ENABLE_WAKE_HID
-    if (itf == 1) {
+    if (itf == usb_keyboard_instance()) {
         if (reqlen >= 8) {
             memset(buffer, 0, 8);
             return 8;
@@ -195,20 +187,24 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
         return pico_cmd_get(report_id, buffer, reqlen);
     }
 
-    // DSE profiles: while the unlock + prefetch is still in progress, return 0
-    // (NAK) for profile reads so the PS app retries rather than caching an
-    // empty snapshot. Still kick off the background BT fetch.
-    if (dse_is_profile_report(report_id) && !dse_profiles_ready()) {
-        get_feature_data(report_id, reqlen);
-        return 0;
+    // Reports that must mirror the controller's live state: the DSE profile
+    // slots (0x70-0x7B) and the test-command result (0x81). Hold the USB
+    // control transfer while the BT GET is in flight; get_feature_data_live()
+    // pumps the BT stack (not tud_task()) until the 0xA3 reply arrives or the
+    // timeout expires, then falls back to the last cached body.
+    if (report_id == 0x81 || (report_id >= 0x70 && report_id <= 0x7B)) {
+        std::vector<uint8_t> live = get_feature_data_live(report_id, 250);
+        if (live.empty()) return 0;
+        const uint16_t n = live.size() < reqlen ? (uint16_t) live.size() : reqlen;
+        memcpy(buffer, live.data(), n);
+        return n;
     }
 
     std::vector<uint8_t> feature_data = get_feature_data(report_id, reqlen);
-    if (!feature_data.empty()) {
-        memcpy(buffer, feature_data.data(), feature_data.size());
-    }
-
-    return feature_data.empty() ? 0 : feature_data.size();
+    if (feature_data.empty()) return 0;
+    const uint16_t n = feature_data.size() < reqlen ? (uint16_t) feature_data.size() : reqlen;
+    memcpy(buffer, feature_data.data(), n);
+    return n;
 }
 
 bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
@@ -228,12 +224,65 @@ bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_reques
     return true;
 }
 
+// Output report 0x02 (SetStateData, without the report id) from the host,
+// sent to the controller as BT output report 0x31.
+static void forward_output_report(uint8_t const *data, uint16_t len) {
+    // An output report with no body has nothing to forward.
+    if (len == 0) {
+        return;
+    }
+    uint8_t outputData[78]{};
+    outputData[0] = 0x31;
+    outputData[1] = reportSeqCounter << 4;
+    reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
+    outputData[2] = 0x10;
+    SetStateData state{};
+    // A short report fills only what it carries; the rest stays zero
+    // instead of being read from past the end of the transfer.
+    const uint16_t n = len < sizeof(SetStateData) ? len : (uint16_t) sizeof(SetStateData);
+    memcpy(&state, data, n);
+
+    const auto &config = get_config();
+    if (config.trigger_reduce > 0) {
+        state.AllowMotorPowerLevel = 1;
+        state.TriggerMotorPowerReduction = config.trigger_reduce;
+    }
+    if (config.speaker_gain > 0) {
+        state.AllowAudioControl2 = 1;
+        state.SpeakerCompPreGain = config.speaker_gain;
+    }
+    if (config.mic_select != 0) {
+        state.AllowAudioControl = 1;
+        state.MicSelect = config.mic_select;
+        state.NoiseCancelEnable = 1;
+    }
+    // Linux hid-playstation sends AudioControl 0 / 0x30 on every headset
+    // plug/unplug; with NoiseCancelEnable cleared the speaker is attenuated
+    // (#263), so keep it set here too.
+    if (state.AllowAudioControl) {
+        state.NoiseCancelEnable = 1;
+    }
+    if (config.lock_volume) {
+        state.AllowHeadphoneVolume = 0;
+        state.AllowMicVolume = 0;
+        state.AllowSpeakerVolume = 0;
+        state.AllowAudioMute = 0;
+        state.AllowMuteLight = 0;
+    }
+
+    memcpy(outputData + 3, &state, sizeof(SetStateData));
+    bt_write(outputData, sizeof(outputData));
+#if ENABLE_VERBOSE
+    printf_hexdump(outputData,sizeof(outputData));
+#endif
+}
+
 // Invoked when received SET_REPORT control request or
 // received data on OUT endpoint ( Report ID = 0, Type = 0 )
 void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer,
                            uint16_t bufsize) {
 #ifdef ENABLE_WAKE_HID
-    if (itf == 1) {
+    if (itf == usb_keyboard_instance()) {
         // Drop keyboard SET_REPORT (host LED state).
         return;
     }
@@ -245,61 +294,41 @@ void tud_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t rep
     (void) bufsize;
 
     if (is_pico_cmd(report_id)) {
+        // TinyUSB owns this buffer. USB printf() may re-enter tud_task() and reuse it,
+        // so copy the entire command before printing or processing it.
+        uint8_t buf_copy[CFG_TUD_HID_EP_BUFSIZE];
+        memcpy(buf_copy, buffer, bufsize);
+
 #if ENABLE_VERBOSE
-        printf("[HID] Receive 0xf6 setting config, funcid:0x%02X\n", buffer[0]);
+        printf("[HID] Receive 0x%02X setting config, funcid:0x%02X\n", report_id, buf_copy[0]);
 #endif
-        pico_cmd_set(report_id, buffer, bufsize);
+
+        pico_cmd_set(report_id, buf_copy, bufsize);
         return;
     }
 
-    // INTERRUPT OUT
-    if (report_id == 0) {
-        switch (buffer[0]) {
-            case 0x02: {
-                uint8_t outputData[78]{};
-                outputData[0] = 0x31;
-                outputData[1] = reportSeqCounter << 4;
-                reportSeqCounter = (reportSeqCounter + 1) & 0x0F;
-                outputData[2] = 0x10;
-                SetStateData state{};
-                memcpy(&state,buffer + 1,sizeof(SetStateData));
-
-                const auto &config = get_config();
-                if (config.trigger_reduce > 0) {
-                    state.AllowMotorPowerLevel = 1;
-                    state.TriggerMotorPowerReduction = config.trigger_reduce;
-                }
-                if (config.speaker_gain > 0) {
-                    state.AllowAudioControl2 = 1;
-                    state.SpeakerCompPreGain = config.speaker_gain;
-                }
-                if (config.mic_select != 0) {
-                    state.AllowAudioControl = 1;
-                    state.MicSelect = config.mic_select;
-                }
-                if (config.lock_volume) {
-                    state.AllowHeadphoneVolume = 0;
-                    state.AllowMicVolume = 0;
-                    state.AllowSpeakerVolume = 0;
-                    state.AllowAudioMute = 0;
-                    state.AllowMuteLight = 0;
-                }
-
-                memcpy(outputData + 3, &state, sizeof(SetStateData));
-                bt_write(outputData, sizeof(outputData));
-#if ENABLE_VERBOSE
-                printf_hexdump(outputData,sizeof(outputData));
-#endif
-                break;
-            }
-        }
+    // Feature reports written by the host must reach the controller: 0x80 is
+    // the test command / DSE unlock, 0x60-0x62 are profile blocks.
+    // set_feature_data() adds the 0x53 BT wrapper and recomputes the CRC that
+    // the USB path leaves as zero (USB does not validate it, BT does).
+    if (report_type == HID_REPORT_TYPE_FEATURE &&
+        (report_id == 0x80 || (report_id >= 0x60 && report_id <= 0x62))) {
+        // TinyUSB owns this buffer and the BT pump can re-enter USB printf,
+        // so copy it before touching anything else.
+        uint8_t buf_copy[CFG_TUD_HID_EP_BUFSIZE];
+        const uint16_t n = bufsize < sizeof(buf_copy) ? bufsize : (uint16_t) sizeof(buf_copy);
+        memcpy(buf_copy, buffer, n);
+        set_feature_data(report_id, buf_copy, n);
+        return;
     }
-    if (report_id == 0x80 ||
-        // DSE: Write Profile Block
-        report_id == 0x60 ||
-        report_id == 0x62 ||
-        report_id == 0x61) {
-        // set_feature_data(report_id, const_cast<uint8_t *>(buffer), bufsize);
+
+    // Output report 0x02 arrives on the interrupt OUT endpoint (report_id 0,
+    // the id in buffer[0]) or, e.g. from HidD_SetOutputReport, as SET_REPORT
+    // on the control pipe (report_id 2, TinyUSB has stripped the id).
+    if (report_id == 0 && bufsize > 0 && buffer[0] == 0x02) {
+        forward_output_report(buffer + 1, bufsize - 1);
+    } else if (report_type == HID_REPORT_TYPE_OUTPUT && report_id == 0x02) {
+        forward_output_report(buffer, bufsize);
     }
 }
 
@@ -308,17 +337,25 @@ int main() {
     vreg_set_voltage(VREG_VOLTAGE_1_20);
     sleep_ms(1000);
     set_sys_clock_khz(SYS_CLOCK_KHZ, true);
+#else
+    vreg_set_voltage(VREG_VOLTAGE_DEFAULT); // the VREG keeps 1.20 V from older firmware until a power cycle
 #endif
 
     board_init();
+    config_load();
+#if !ENABLE_SERIAL
+    usb_keyboard_only = get_config().enable_wake;
+#endif
     tusb_rhport_init_t dev_init = {
         .role = TUSB_ROLE_DEVICE,
         .speed = TUSB_SPEED_FULL
     };
     tusb_init(BOARD_TUD_RHPORT, &dev_init);
 #if !ENABLE_SERIAL
-    sleep_ms(150);
-    tud_disconnect();
+    if (!usb_keyboard_only) {
+        sleep_ms(150);
+        tud_disconnect();
+    }
 #endif
     board_init_after_tusb();
 #if ENABLE_SERIAL
@@ -330,8 +367,14 @@ int main() {
 #endif
 
     if (cyw43_arch_init()) {
-        printf("Failed to initialize CYW43\n");
-        return 1;
+        // Returning here hangs the board (the watchdog isn't armed yet) until
+        // it is unplugged; reboot instead so the next boot retries.
+        printf("Failed to initialize CYW43, rebooting\n");
+        sleep_ms(500);
+        watchdog_reboot(0, 0, 0);
+        while (true) {
+            tight_loop_contents();
+        }
     }
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
 
@@ -360,12 +403,9 @@ int main() {
     }
 #endif
 
-    // Initialize the critical section for the report buffer
-    critical_section_init(&report_cs);
     xinput_init();
     wake_init();
 
-    config_load();
     gpio_on_disconnect();
 
     bt_init();
@@ -385,6 +425,7 @@ int main() {
         tud_task();
         usb_gamepad_task();
         wake_task();
+        if (!usb_xinput_mode()) button_shortcut_task();
         audio_loop();
 #if ENABLE_DEBUG
         debug_log_core1_stack_usage();
@@ -396,6 +437,5 @@ int main() {
         button_check();
         bt_inquiring_led();
         button_feedback_tick();
-        dse_task();
     }
 }

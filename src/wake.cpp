@@ -3,6 +3,7 @@
 //
 
 #include "wake.h"
+#include "usb.h"
 
 #ifdef ENABLE_WAKE_HID
 
@@ -13,12 +14,12 @@
 #include "device/dcd.h"
 #include "pico/sync.h"
 #include "pico/time.h"
-#include "ps_shortcut.h"
+#include "button_shortcut.h"
 #include "config.h"
 #include "usb_mode.h"
 
 
-#define WAKE_KBD_INSTANCE     1
+#define WAKE_KBD_INSTANCE     usb_keyboard_instance()
 #define WAKE_KEYCODE_F15      0x68
 // Post-resume timings tuned for "wake-and-resleep" Windows behavior: the host
 // resumes USB, but if no HID input is consumed during the brief wake window
@@ -179,14 +180,38 @@ extern "C" void tud_resume_cb(void) {
     host_suspended = false;
     host_resumed_event = true;
     suspend_at_us = 0;   // resumed before the debounce elapsed -> cancel the disconnect
+
+#if !ENABLE_SERIAL
+    if (!bt_is_connected()) {
+        if (!get_config().enable_wake) {
+            tud_disconnect();
+        } else if (!usb_xinput_mode() && !usb_keyboard_only) {
+            usb_reconnect(true);
+        }
+    }
+#endif
 }
 
 extern "C" void tud_mount_cb(void) {
+    button_shortcut_reset();
+    usb_reconfiguring = false;
     WAKE_DBG("tud_mount_cb state=%s", wake_state_name(state));
     host_suspended = false;
     host_resumed_event = true;
     suspend_at_us = 0;
     reconnect_until_us = 0;   // reconnect finished re-enumerating; end the grace early
+
+    // Remove the ghost controller on resume/re-enumeration; retain only the wake keyboard when enabled.
+    // If USB keep-charging is enabled, the PC may show a ghost device after startup/resume.
+#if !ENABLE_SERIAL
+    if (!bt_is_connected()) {
+        if (!get_config().enable_wake) {
+            tud_disconnect();
+        } else if (!usb_xinput_mode() && !usb_keyboard_only) {
+            usb_reconnect(true);
+        }
+    }
+#endif
 }
 
 void wake_on_bt_input(const uint8_t *hid_input, uint16_t len) {
@@ -233,7 +258,16 @@ void wake_on_bt_disconnect(void) {
     state = WAKE_IDLE;
     prev_b7 = 0x08; prev_b8 = 0x00; prev_b9 = 0x00;
     critical_section_exit(&wake_cs);
-    ps_shortcut_reset();
+    button_shortcut_reset();
+}
+
+bool wake_keyboard_busy() {
+    if (!get_config().enable_wake) return false;
+    critical_section_enter_blocking(&wake_cs);
+    const bool busy = state == WAKE_REQUESTED || state == WAKE_KEY_DOWN ||
+                      state == WAKE_KEY_UP_SENT;
+    critical_section_exit(&wake_cs);
+    return busy;
 }
 
 void wake_task(void) {

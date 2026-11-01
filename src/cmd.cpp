@@ -9,11 +9,12 @@
 #include <cstring>
 
 #include "bt.h"
+#include "button_shortcut.h"
 #include "config.h"
 #include "device/usbd.h"
 #include "pico/time.h"
 #include "audio.h"
-#include "wake.h"
+#include "usb.h"
 
 extern bool spk_active;
 
@@ -21,7 +22,9 @@ bool is_pico_cmd(uint8_t report_id) {
     if (report_id == 0xf6 ||
         report_id == 0xf7 ||
         report_id == 0xf8 ||
-        report_id == 0xf9
+        report_id == 0xf9 ||
+        report_id == 0xfa ||
+        report_id == 0xfb
     ) {
         return true;
     }
@@ -68,12 +71,36 @@ uint16_t pico_cmd_get(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
 #endif
         return 1;
     }
+    if (report_id == 0xfa) {
+        printf("[HID] Receive 0xfa getting button remaps\n");
+        const auto len = std::min(static_cast<size_t>(BUTTON_REMAP_COUNT),
+                                  static_cast<size_t>(reqlen));
+        memcpy(buffer, get_button().button_remap, len);
+        return len;
+    }
+    if (report_id == 0xfb) {
+        printf("[HID] Receive 0xfb getting shortcut slots\n");
+        const auto len = std::min(sizeof(Button::shortcuts), static_cast<size_t>(reqlen));
+        memcpy(buffer, get_button().shortcuts, len);
+        return len;
+    }
     return 0;
 }
 
 void pico_cmd_set(uint8_t report_id, uint8_t const *buffer, uint16_t bufsize) {
-    (void) report_id;
     if (bufsize == 0) {
+        return;
+    }
+
+    if (report_id == 0xfa) {
+        printf("[HID] Receive 0xfa setting button remaps\n");
+        set_button_remap(buffer, bufsize);
+        return;
+    }
+
+    if (report_id == 0xfb) {
+        printf("[HID] Receive 0xfb setting shortcut slots\n");
+        set_shortcut(buffer, bufsize);
         return;
     }
 
@@ -86,15 +113,21 @@ void pico_cmd_set(uint8_t report_id, uint8_t const *buffer, uint16_t bufsize) {
 #endif
         set_config(buffer + 1, bufsize - 1);
     }
-    if (buffer[0] == 0x02) {
+    if (buffer[0] == PICO_CMD_SAVE_TO_FLASH) {
         printf("[CMD] Enter config save func\n");
         config_save();
     }
-    if (buffer[0] == 0x03) {
+    if (buffer[0] == PICO_CMD_RECONNECT_USB) {
         printf("[CMD] Enter tud reconnect func\n");
-        wake_note_usb_reconnect();   // this disconnect is intentional, not a host sleep
-        tud_disconnect();
-        sleep_ms(150);
-        tud_connect();
+        usb_reconnect(usb_keyboard_only);
+    }
+    if (buffer[0] == PICO_CMD_SHORTCUT_LEARNING) {
+        // The config UI starts listening for a controller trigger; pause the
+        // shortcut state machine so the captured press does not also fire.
+        // Only starting is supported: a window always ends on its deadline.
+        if (bufsize >= 2 && buffer[1]) {
+            printf("[CMD] Shortcut learning window\n");
+            button_shortcut_start_learning();
+        }
     }
 }

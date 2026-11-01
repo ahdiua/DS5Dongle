@@ -10,18 +10,18 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # (note this can come from environment, CMake cache etc)
 
 # == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
-if (WIN32)
+if(WIN32)
     set(USERHOME $ENV{USERPROFILE})
-else ()
+else()
     set(USERHOME $ENV{HOME})
-endif ()
-set(sdkVersion 2.3.0)
+endif()
+set(sdkVersion 2.3.1)
 set(toolchainVersion 15_2_Rel1)
-set(picotoolVersion 2.3.0)
+set(picotoolVersion 2.3.1)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 if (EXISTS ${picoVscode})
     include(${picoVscode})
-endif ()
+endif()
 # ====================================================================================
 
 option(PICO_W_BUILD "Build for Rasberry Pi Pico W, audio is missing" OFF)
@@ -118,12 +118,15 @@ add_executable(ds5-bridge
         src/button_functions.cpp
         src/usb_mode.cpp
         src/xinput.cpp
-        src/dse.cpp
         src/config.cpp
         src/status_gpio.cpp
         src/cmd.cpp
         src/ram_mem.c
         src/fake_ds5.h
+        src/button_remap.cpp
+        src/button_remap.h
+        src/button_utils.cpp
+        src/button_utils.h
 )
 
 if (ENABLE_DEBUG)
@@ -308,15 +311,15 @@ target_compile_definitions(ds5-bridge PRIVATE
         DISABLE_SPEAKER_PROC=${DISABLE_SPEAKER_PROC_VALUE}
 )
 
-# Wake-on-PS + Xbox Game Bar are now in the base firmware, gated at runtime by the
-# enable_wake / ps_shortcut_enabled config fields. ENABLE_WAKE_HID stays defined so
+# Wake-on-PS + keyboard shortcuts are in the base firmware, gated at runtime by the
+# wake config and Button shortcut slots. ENABLE_WAKE_HID stays defined so
 # the wake/keyboard descriptors and TinyUSB capacity compile in; the interface and
 # behavior are only presented/run when enabled at runtime (see usb_descriptors.cpp,
 # wake.cpp).
 target_compile_definitions(ds5-bridge PRIVATE ENABLE_WAKE_HID)
 target_sources(ds5-bridge PRIVATE
         src/wake.cpp
-        src/ps_shortcut.cpp
+        src/button_shortcut.cpp
 )
 
 option(WAKE_DEBUG "Print wake-FSM transitions to UART (developer use)" OFF)

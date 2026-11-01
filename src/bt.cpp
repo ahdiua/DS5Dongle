@@ -12,6 +12,7 @@
 #include "btstack_event.h"
 #include "btstack_tlv.h"
 #include "gap.h"
+#include "hci.h"
 #include "l2cap.h"
 #include "pico/cyw43_arch.h"
 #include "utils.h"
@@ -19,12 +20,14 @@
 #include "classic/sdp_server.h"
 #include "config.h"
 #include "status_gpio.h"
-#include "dse.h"
 #include "fake_ds5.h"
 #include "wake.h"
 #include "usb_mode.h"
 #include "xinput.h"
+#include "usb.h"
 #include "pico/util/queue.h"
+#include "pico/time.h"
+#include "pico/platform.h"
 #if ENABLE_BATT_LED
 #include "battery_led.h"
 #endif
@@ -54,7 +57,7 @@ static int bt_clear_flash_toggles_remaining = 0;
 static uint32_t bt_clear_flash_last_toggle_ms = 0;
 // Persistent blacklist of controllers cleared by BOOTSEL hold. Survives
 // power-cycles via BTstack TLV flash storage. Blocked at CONNECTION_REQUEST
-// so PS-only auto-reconnect fails; INQUIRY_RESULT path is still allowed so
+// so PS-only auto-reconnect fails; the inquiry path is still allowed so
 // the user can intentionally re-pair the controller in PS+Share mode, which
 // removes that MAC from the blacklist on successful pair.
 #define BT_BLACKLIST_TLV_TAG  ((uint32_t) 0x424C434B) // ASCII 'BLCK'
@@ -73,6 +76,9 @@ static uint16_t hid_interrupt_cid;
 static bt_data_callback_t bt_data_callback = nullptr;
 static int8_t bt_rssi = 0;
 unordered_map<uint8_t, vector<uint8_t> > feature_data;
+// Bumped every time a feature report arrives on the HID control channel.
+// Used as a lightweight "response arrived" signal by get_feature_data_live().
+static volatile uint32_t feature_rx_epoch[256];
 queue_t send_fifo;
 
 struct send_element {
@@ -164,6 +170,11 @@ int bt_init() {
 
     hci_event_callback_registration.callback = &hci_packet_handler;
     hci_add_event_handler(&hci_event_callback_registration);
+
+    // Ask the controller for inquiry results with RSSI + Extended Inquiry
+    // Response so each result carries the remote device name. Must be set
+    // before the stack is powered on (the HCI init sequence writes it).
+    hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
 
     hci_power_control(HCI_POWER_ON);
     return 0;
@@ -371,6 +382,15 @@ void bt_inquiring_led() {
     }
 }
 
+// Returns true when the advertised device name starts with "DualSense"
+// (covers both "DualSense Wireless Controller" and "DualSense Edge Wireless
+// Controller"). The name comes from the EIR payload and is not NUL-terminated.
+static bool inquiry_name_is_dualsense(const uint8_t *name, uint8_t name_len) {
+    static const char prefix[] = "DualSense";
+    const uint8_t prefix_len = sizeof(prefix) - 1;
+    return name_len >= prefix_len && memcmp(name, prefix, prefix_len) == 0;
+}
+
 static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_t channel, uint8_t *packet,
                                                     uint16_t size) {
     (void) channel;
@@ -391,33 +411,41 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             }
             break;
         }
-        case HCI_EVENT_INQUIRY_RESULT:
-        case HCI_EVENT_INQUIRY_RESULT_WITH_RSSI:
-        case HCI_EVENT_EXTENDED_INQUIRY_RESPONSE: {
-            bd_addr_t addr;
-            uint32_t cod;
+        // BTstack's GAP layer parses the Extended Inquiry Response (EIR) of
+        // every inquiry response and republishes it as GAP_EVENT_INQUIRY_RESULT
+        // with the advertised device name attached (BTstack also still forwards
+        // the raw HCI event, but only this event carries the name). Only a
+        // device whose name starts with "DualSense" is accepted; all other
+        // devices found during the inquiry are ignored.
+        case GAP_EVENT_INQUIRY_RESULT: {
+            if (device_found) break; // already latched a target, keep first match
 
-            if (event_type == HCI_EVENT_INQUIRY_RESULT) {
-                cod = hci_event_inquiry_result_get_class_of_device(packet);
-                hci_event_inquiry_result_get_bd_addr(packet, addr);
-            } else if (event_type == HCI_EVENT_INQUIRY_RESULT_WITH_RSSI) {
-                cod = hci_event_inquiry_result_with_rssi_get_class_of_device(packet);
-                hci_event_inquiry_result_with_rssi_get_bd_addr(packet, addr);
-            } else {
-                cod = hci_event_extended_inquiry_response_get_class_of_device(packet);
-                hci_event_extended_inquiry_response_get_bd_addr(packet, addr);
+            bd_addr_t addr;
+            gap_event_inquiry_result_get_bd_addr(packet, addr);
+            const uint8_t name_len = gap_event_inquiry_result_get_name_len(packet);
+            const uint8_t *name = gap_event_inquiry_result_get_name(packet);
+
+            // Without an EIR name the device cannot be identified, so skip it
+            // rather than connecting to something that might not be a DS5.
+            if (!gap_event_inquiry_result_get_name_available(packet) || name_len == 0) {
+                printf("[HCI] Inquiry result %s: no name in EIR, skip\n", bd_addr_to_str(addr));
+                break;
             }
 
-            // CoD 0x002508 = Gamepad (Major: Peripheral, Minor: Gamepad)
+            printf("[HCI] Inquiry result %s name=\"%.*s\"\n",
+                   bd_addr_to_str(addr), (int) name_len, reinterpret_cast<const char *>(name));
+
             // Blacklisted MACs are NOT filtered here so the user can intentionally
             // re-pair them in PS+Share mode (dongle-initiated path). PS-only
             // (controller-initiated) is blocked at CONNECTION_REQUEST.
-            if ((cod & 0x000F00) == 0x000500) {
-                printf("[HCI] Gamepad found: %s (CoD: 0x%06x)\n", bd_addr_to_str(addr), (unsigned int) cod);
-                bd_addr_copy(current_device_addr, addr);
-                device_found = true;
-                gap_inquiry_stop();
+            if (!inquiry_name_is_dualsense(name, name_len)) {
+                break;
             }
+
+            printf("[HCI] DualSense found: %s\n", bd_addr_to_str(addr));
+            bd_addr_copy(current_device_addr, addr);
+            device_found = true;
+            gap_inquiry_stop();
             break;
         }
         case GAP_EVENT_INQUIRY_COMPLETE:
@@ -550,9 +578,17 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             const hci_con_handle_t handle = hci_event_authentication_complete_get_connection_handle(packet);
             printf("[HCI] Authentication complete handle=0x%04X status=0x%02X\n", handle, status);
             if (status != ERROR_CODE_SUCCESS) {
-                printf("[HCI] Authentication failed, drop stored key for %s\n", bd_addr_to_str(current_device_addr));
-                gap_drop_link_key_for_bd_addr(current_device_addr);
-                // gap_inquiry_start(30);
+                // Only a rejected or missing key means the pairing is gone. Other
+                // failures (a timeout, the link dropping mid-way) keep the key,
+                // so the controller can reconnect with PS without pairing again.
+                if (status == ERROR_CODE_AUTHENTICATION_FAILURE || status == ERROR_CODE_PIN_OR_KEY_MISSING) {
+                    printf("[HCI] Authentication failed, drop stored key for %s\n", bd_addr_to_str(current_device_addr));
+                    gap_drop_link_key_for_bd_addr(current_device_addr);
+                } else {
+                    printf("[HCI] Authentication failed (status 0x%02X), key kept\n", status);
+                }
+                bt_disconnect();
+                gap_inquiry_start(30);
             } else {
                 hci_send_cmd(&hci_set_connection_encryption, handle, 1);
             }
@@ -619,6 +655,11 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             hid_interrupt_cid = 0;
             wake_on_bt_disconnect();
             gpio_on_disconnect();
+#if !ENABLE_SERIAL
+            if (!usb_xinput_mode() && get_config().enable_wake && !tud_suspended()) {
+                usb_reconnect(true);
+            }
+#endif
             while (queue_try_remove(&send_fifo, NULL)) {
             }
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
@@ -657,7 +698,8 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
             bt_data_callback(INTERRUPT, packet, size);
 
             // 静默检测
-            if (!(packet[2] & 1) || get_config().inactive_time == 0) {
+            // reads packet[2..12]: skip frames shorter than that
+            if (size < 13 || !(packet[2] & 1) || get_config().inactive_time == 0) {
                 return;
             }
             if (packet[3] < 120 || packet[3] > 140 ||
@@ -678,6 +720,7 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
             if (packet[0] == 0xA3) {
                 const uint8_t report_id = packet[1];
                 feature_data[report_id].assign(packet + 2, packet + size);
+                feature_rx_epoch[report_id]++;
 #if ENABLE_VERBOSE
                 printf("[L2CAP] Stored Feature Report 0x%02X, len=%u\n", report_id, size - 2);
                 printf("[L2CAP] HID Control data len=%u\n", size);
@@ -687,7 +730,6 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                     if (packet[23] == 0x44) {
                         printf("Connected DSE Controller\n");
                         is_dse = true;
-                        dse_on_connect();
 
                         if (get_config().controller_mode == 0) {
                             feature_data[0x20].assign(report20,report20 + sizeof(report20));
@@ -697,12 +739,11 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                         is_dse = false;
                     }
 #if !ENABLE_SERIAL
-                    if (!tud_suspended()) tud_connect();
+                    usb_reconnect(false);
 #endif
                 }
             }
 
-            dse_on_control_packet(packet, size);
             bt_data_callback(CONTROL, packet, size);
         } else {
             printf("[L2CAP] Data on unknown channel 0x%04X (Interrupt: 0x%04X, Control: 0x%04X)\n",
@@ -751,6 +792,7 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                         .AllowAudioControl = 1,
                         .AllowLedColor = 1,
                         .MicSelect = get_config().mic_select,
+                        .NoiseCancelEnable = 1,
                         .AllowLightBrightnessChange = 1,
                         .AllowColorLightFadeAnimation = 1,
                         .LightFadeAnimation = LightFadeAnimation::FadeOut,
@@ -839,15 +881,24 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
     }
 }
 
-// Accessors used by the DSE profile module (dse.cpp).
-uint16_t bt_control_cid() {
-    return hid_control_cid;
-}
+// Push one already-built feature-report frame onto the HID control channel.
+// l2cap_send() fails when no ACL buffer is free, so retry while pumping the
+// stack. Keeping this synchronous also guarantees ordering: the SET is on the
+// wire before the host can issue the GET that follows it.
+static bool control_send_wait(const uint8_t *data, uint16_t len, uint16_t timeout_ms) {
+    if (hid_control_cid == 0) return false;
 
-void bt_control_send(const uint8_t *data, uint16_t len) {
-    if (hid_control_cid != 0) {
-        l2cap_send(hid_control_cid, const_cast<uint8_t *>(data), len);
-    }
+    const absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
+    do {
+        if (l2cap_can_send_packet_now(hid_control_cid) &&
+            l2cap_send(hid_control_cid, const_cast<uint8_t *>(data), len) == 0) {
+            return true;
+        }
+        cyw43_arch_poll();
+        tight_loop_contents();
+    } while (!time_reached(deadline));
+
+    return false;
 }
 
 void __not_in_flash_func(bt_write)(const uint8_t *data, const uint16_t len) {
@@ -872,26 +923,24 @@ void bt_discard_pending_output() {
 }
 
 vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
-    // 若为0x81则会请求新内容，其他若有旧数据则不进行请求
+    (void) len;
+    // Fire-and-forget refresh for reports that change on the controller side;
+    // callers that need a synchronous answer use get_feature_data_live().
     auto ret = vector<uint8_t>{};
     const bool has_cached_report = feature_data.contains(reportId);
     if (has_cached_report) {
         ret = feature_data[reportId];
     }
     if (!has_cached_report ||
-        // Get Test Command Result
-        // reportId == 0x81 ||
         // DSE: Set Profile Save?
         reportId == 0x63 ||
         reportId == 0x65 ||
-        reportId == 0x64 ||
-        // DSE profile slots: return cache, but refetch in background so the
-        // PS app's unlock(0x80) -> re-read flow sees fresh controller data.
-        dse_is_profile_report(reportId)
-    ) {
+        reportId == 0x64) {
         if (hid_control_cid != 0) {
             uint8_t get_feature[] = {0x43, reportId};
-            l2cap_send(hid_control_cid, get_feature, sizeof(get_feature));
+            if (!control_send_wait(get_feature, sizeof(get_feature), 100)) {
+                printf("[L2CAP] Request Get Feature Report 0x%02X failed\n", reportId);
+            }
 #if ENABLE_VERBOSE
             printf("[L2CAP] Requesting Get Feature Report 0x%02X\n", reportId);
 #endif
@@ -900,19 +949,70 @@ vector<uint8_t> get_feature_data(uint8_t reportId, uint16_t len) {
     return ret;
 }
 
-void set_feature_data(uint8_t reportId, uint8_t *data, uint16_t len) {
-    if (hid_control_cid != 0) {
-        uint8_t get_feature[len + 2];
-        get_feature[0] = 0x53;
-        get_feature[1] = reportId;
-        memcpy(get_feature + 2, data, len);
-        fill_feature_report_checksum(get_feature + 1, len + 1);
-        l2cap_send(hid_control_cid, get_feature, len + 2);
+vector<uint8_t> get_feature_data_live(uint8_t reportId, uint16_t timeout_ms) {
+    auto cached = vector<uint8_t>{};
+    auto it = feature_data.find(reportId);
+    if (it != feature_data.end()) {
+        cached = it->second;
+    }
+
+    if (hid_control_cid == 0) {
+        return cached;
+    }
+
+    // Ask the controller for the report, then drive the BT stack until the
+    // matching 0xA3 response shows up. This is the rendezvous that turns the
+    // asynchronous BT reply into the synchronous USB control-transfer answer:
+    // TinyUSB is still waiting in tud_hid_get_report_cb() while we pump.
+    const absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
+    uint8_t get_feature[] = {0x43, reportId};
+    bool sent = false;
+    uint32_t epoch = 0;
+
+    while (!time_reached(deadline)) {
+        if (!sent) {
+            if (l2cap_can_send_packet_now(hid_control_cid) &&
+                l2cap_send(hid_control_cid, get_feature, sizeof(get_feature)) == 0) {
+                sent = true;
+                epoch = feature_rx_epoch[reportId];
 #if ENABLE_VERBOSE
-        printf("[L2CAP] Requesting Set Feature Report 0x%02X\n", reportId);
-        printf_hexdump(get_feature, len + 2);
+                printf("[L2CAP] Get Feature Report 0x%02X (live)\n", reportId);
 #endif
-        dse_on_profile_write(reportId);
+            }
+        }
+
+        cyw43_arch_poll();
+
+        if (sent && feature_rx_epoch[reportId] != epoch) {
+            break;
+        }
+        tight_loop_contents();
+    }
+
+    it = feature_data.find(reportId);
+    return it != feature_data.end() ? it->second : cached;
+}
+
+void set_feature_data(uint8_t reportId, uint8_t *data, uint16_t len) {
+    if (hid_control_cid == 0) return;
+    // The trailer carries the CRC, so anything shorter than 4 bytes cannot be
+    // checksummed (and would underflow the helper).
+    if (len < 4) return;
+
+    uint8_t get_feature[len + 2];
+    get_feature[0] = 0x53;
+    get_feature[1] = reportId;
+    memcpy(get_feature + 2, data, len);
+    // The host sends feature reports with a zero CRC field over USB (the USB
+    // path does not validate it); the BT link does, so compute it over
+    // [report id + first len-4 payload bytes] for the full-length report.
+    fill_feature_report_checksum(get_feature + 1, len + 1);
+#if ENABLE_VERBOSE
+    printf("[L2CAP] Requesting Set Feature Report 0x%02X\n", reportId);
+    printf_hexdump(get_feature, len + 2);
+#endif
+    if (!control_send_wait(get_feature, len + 2, 100)) {
+        printf("[L2CAP] Set Feature Report 0x%02X failed\n", reportId);
     }
 }
 
