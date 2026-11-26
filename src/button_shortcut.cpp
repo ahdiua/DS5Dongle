@@ -15,6 +15,11 @@
 bool shortcut_slot_valid(const ButtonShortcut &shortcut) {
     if (shortcut.trigger_a >= Disable) return false;
     if (shortcut.flags & ~SHORTCUT_FLAG_MASK) return false;
+    if ((shortcut.flags & SHORTCUT_FLAG_MODIFIER_HOLD) &&
+        (shortcut.flags != SHORTCUT_FLAG_MODIFIER_HOLD ||
+         shortcut.action != ShortcutActionKeyboard ||
+         shortcut.trigger_b >= Disable ||
+         shortcut.keyboard.modifiers == 0 || shortcut.keyboard.key < 0x04)) return false;
     if ((shortcut.flags & SHORTCUT_FLAG_HOLD) &&
         (shortcut.action != ShortcutActionKeyboard ||
          (shortcut.flags & SHORTCUT_FLAG_DOUBLE_TAP) ||
@@ -51,7 +56,12 @@ bool shortcut_slot_valid(const ButtonShortcut &shortcut) {
 
 static constexpr uint8_t KEYBOARD_INSTANCE = 1;
 static constexpr uint8_t CONSUMER_INSTANCE = 2;
+static constexpr uint8_t SLEEP_INSTANCE = 1; // Interface 1 in descriptor_keyboard_sleep
 static constexpr uint32_t KEY_PRESS_MS = 30;
+static constexpr uint32_t HOST_SLEEP_MOUNT_SETTLE_MS = 150;
+static constexpr uint32_t HOST_SLEEP_HOLD_MS = 50;
+static constexpr uint32_t HOST_SLEEP_GRACE_MS = 3000;
+static constexpr uint32_t HOST_SLEEP_TIMEOUT_MS = 5000;
 
 static bool release_pending = false;
 static absolute_time_t release_time = nil_time;
@@ -69,6 +79,8 @@ static uint16_t engaged_mask = 0; // Last-tick engagement of each slot; fire on 
 // until the button comes back up, so a chord that has already come and gone
 // still keeps the lone-tap action from firing on release.
 static uint16_t chord_claimed_mask = 0;
+static uint16_t modifier_hold_active_mask = 0;
+static bool unavailable_reset = false;
 
 // Set from the USB command path while the config UI is learning a trigger.
 // A plain flag is enough: the window closing is keyed off a deadline, and the
@@ -89,6 +101,12 @@ static bool keyboard_clear_pending = false;
 static bool consumer_clear_pending = false;
 static bool keyboard_dirty = false;
 static bool wake_owned_keyboard = false;
+static bool host_sleep_pending = false;
+static bool host_sleep_active = false;
+static absolute_time_t host_sleep_ready_at = nil_time;
+static absolute_time_t host_sleep_release_at = nil_time;
+static absolute_time_t host_sleep_deadline = nil_time;
+static absolute_time_t host_sleep_grace_until = nil_time;
 
 static bool shortcuts_available() {
     return !usb_keyboard_only && !usb_reconfiguring && tud_mounted() && !tud_suspended();
@@ -179,7 +197,7 @@ static bool has_double_tap_partner(uint8_t slot, const ButtonShortcut &shortcut)
 static bool send_release(uint8_t instance) {
     if (instance == CONSUMER_INSTANCE) {
         uint16_t usage = 0;
-        return tud_hid_n_report(CONSUMER_INSTANCE, 0, &usage, sizeof(usage));
+        return tud_hid_n_report(CONSUMER_INSTANCE, 1, &usage, sizeof(usage));
     }
     keyboard_dirty = true;
     return send_keyboard_state(false);
@@ -203,7 +221,7 @@ static bool send_consumer(const ButtonShortcut &shortcut) {
 
     // Copy out of the packed struct before taking an address.
     uint16_t usage = shortcut.consumer.usage;
-    if (!tud_hid_n_report(CONSUMER_INSTANCE, 0, &usage, sizeof(usage))) return false;
+    if (!tud_hid_n_report(CONSUMER_INSTANCE, 1, &usage, sizeof(usage))) return false;
 
     start_pulse(CONSUMER_INSTANCE);
     return true;
@@ -276,6 +294,7 @@ static bool tap_tick(uint8_t slot, const ButtonShortcut &shortcut, bool engaged,
 static void process_shortcuts(const USBGetStateData &state) {
     KeyboardState next_keyboard;
     uint16_t new_engaged_mask = 0;
+    uint16_t new_modifier_hold_active_mask = 0;
     uint16_t valid_mask = 0;
     uint32_t chord_buttons = 0; // Buttons some configured chord uses.
     uint32_t chord_held = 0; // Buttons of the chords held right now.
@@ -287,6 +306,25 @@ static void process_shortcuts(const USBGetStateData &state) {
         const auto &shortcut = get_button().shortcuts[i];
         if (!shortcut_slot_valid(shortcut)) continue;
         const bool engaged = trigger_engaged(state, shortcut);
+        const uint16_t bit = static_cast<uint16_t>(1u << i);
+        if (shortcut.flags & SHORTCUT_FLAG_MODIFIER_HOLD) {
+            const uint32_t buttons =
+                button_bit(shortcut.trigger_a) | button_bit(shortcut.trigger_b);
+            chord_buttons |= buttons;
+            const bool active = button_is_pressed(state, shortcut.trigger_a) &&
+                                (engaged || (modifier_hold_active_mask & bit));
+            if (active) {
+                new_modifier_hold_active_mask |= bit;
+                // Claim repeated B presses for the entire A hold, including
+                // the B-up reports between them. Neither lone tap may leak out.
+                chord_held |= buttons;
+                next_keyboard.modifiers |= shortcut.keyboard.modifiers;
+                if (button_is_pressed(state, shortcut.trigger_b)) {
+                    next_keyboard.keys[shortcut.keyboard.key] = true;
+                }
+            }
+            continue; // This mode contributes held state, never a timed pulse.
+        }
         if (shortcut.flags & SHORTCUT_FLAG_HOLD) {
             if (engaged) {
                 next_keyboard.modifiers |= shortcut.keyboard.modifiers;
@@ -295,7 +333,6 @@ static void process_shortcuts(const USBGetStateData &state) {
             continue; // Holds are independent of tap/chord arbitration.
         }
 
-        const uint16_t bit = static_cast<uint16_t>(1u << i);
         valid_mask |= bit;
 
         if (!is_tap_slot(shortcut)) {
@@ -326,6 +363,7 @@ static void process_shortcuts(const USBGetStateData &state) {
         keyboard_dirty = true;
     }
     engaged_mask = new_engaged_mask;
+    modifier_hold_active_mask = new_modifier_hold_active_mask;
     // A slot reconfigured out from under a pending action never gets to fire it.
     pending_mask &= valid_mask;
     chord_claimed_mask &= valid_mask;
@@ -371,15 +409,60 @@ void button_shortcut_reset() {
     pending_mask = 0;
     engaged_mask = 0;
     chord_claimed_mask = 0;
+    modifier_hold_active_mask = 0;
     for (uint8_t i = 0; i < BUTTON_SHORTCUT_COUNT; ++i) {
         tap_count[i] = 0;
         tap_deadline[i] = nil_time;
     }
 }
 
+static void host_sleep_task() {
+    if (host_sleep_pending) {
+        if (time_reached(host_sleep_deadline)) {
+            host_sleep_pending = false;
+            host_sleep_ready_at = nil_time;
+            usb_sleep_mode = false;
+            return;
+        }
+        if (usb_sleep_mode && !usb_reconfiguring && tud_mounted() && !tud_suspended()) {
+            if (is_nil_time(host_sleep_ready_at)) {
+                host_sleep_ready_at = make_timeout_time_ms(HOST_SLEEP_MOUNT_SETTLE_MS);
+            } else if (time_reached(host_sleep_ready_at) && tud_hid_n_ready(SLEEP_INSTANCE)) {
+                uint8_t sleep_cmd = 0x02; // System Sleep (Report ID 2: System Control)
+                if (tud_hid_n_report(SLEEP_INSTANCE, 2, &sleep_cmd, sizeof(sleep_cmd))) {
+                    host_sleep_pending = false;
+                    host_sleep_active = true;
+                    host_sleep_ready_at = nil_time;
+                    host_sleep_release_at = make_timeout_time_ms(HOST_SLEEP_HOLD_MS);
+                }
+            }
+        }
+    } else if (host_sleep_active) {
+        if (time_reached(host_sleep_release_at) && tud_hid_n_ready(SLEEP_INSTANCE)) {
+            uint8_t zero = 0;
+            if (tud_hid_n_report(SLEEP_INSTANCE, 2, &zero, sizeof(zero))) {
+                host_sleep_active = false;
+                host_sleep_grace_until = make_timeout_time_ms(HOST_SLEEP_GRACE_MS);
+#if !ENABLE_SERIAL
+                if (!get_config().enable_wake && !bt_is_connected()) {
+                    tud_disconnect();
+                }
+#endif
+            }
+        }
+    }
+}
+
 void button_shortcut_task() {
+    host_sleep_task();
+
     // Also called without BT input so endpoint backpressure/disconnect releases retry.
-    if (!shortcuts_available()) return;
+    if (!shortcuts_available()) {
+        if (!unavailable_reset) button_shortcut_reset();
+        unavailable_reset = true;
+        return;
+    }
+    unavailable_reset = false;
     if (shortcut_learning) {
         if (time_reached(shortcut_learning_until)) {
             shortcut_learning = false;
@@ -417,7 +500,10 @@ void button_shortcut_task() {
 }
 
 void button_shortcut_tick(const USBGetStateData &state) {
-    if (!shortcuts_available() || wake_keyboard_busy()) return;
+    if (!shortcuts_available() || wake_keyboard_busy()) {
+        button_shortcut_task(); // Observe endpoint ownership even before the main-loop pass.
+        return;
+    }
     if (shortcut_learning) {
         // Reading the deadline here is what ends the window; BT input arrives
         // anyway, so learning does not depend on button_shortcut_task() running.
@@ -432,6 +518,20 @@ void button_shortcut_start_learning() {
     shortcut_learning = true;
     shortcut_learning_reset = false;
     shortcut_learning_until = make_timeout_time_ms(SHORTCUT_LEARNING_WINDOW_MS);
+}
+
+void trigger_host_sleep() {
+    host_sleep_pending = true;
+    host_sleep_active = false;
+    host_sleep_ready_at = nil_time;
+    host_sleep_deadline = make_timeout_time_ms(HOST_SLEEP_TIMEOUT_MS);
+    host_sleep_grace_until = nil_time;
+    usb_reconnect_sleep();
+}
+
+bool host_sleep_in_progress() {
+    return host_sleep_pending || host_sleep_active ||
+           (!is_nil_time(host_sleep_grace_until) && !time_reached(host_sleep_grace_until));
 }
 
 #endif // ENABLE_WAKE_HID

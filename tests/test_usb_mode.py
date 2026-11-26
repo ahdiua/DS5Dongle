@@ -21,7 +21,7 @@ class UsbModeTests(unittest.TestCase):
             (tmp / 'platform.h').write_text('''#pragma once
 #include <cstdint>
 inline bool connected = false, suspended = false, attached = false;
-inline bool usb_keyboard_only = false, usb_reconfiguring = false;
+inline bool usb_keyboard_only = false, usb_reconfiguring = false, usb_sleep_mode = false;
 inline bool spk_active = false;
 inline unsigned connects = 0, disconnects = 0, effects_cleared = 0;
 struct Config { bool enable_wake = false; };
@@ -47,8 +47,9 @@ int main() {
     // Booted as a wake keyboard, BOOTSEL selects XInput before BT connects.
     config.enable_wake = true;
     usb_keyboard_only = attached = true;
+    usb_sleep_mode = true; // Switching away from a dock-sleep identity clears it.
     usb_gamepad_toggle_mode();
-    assert(usb_xinput_mode() && !usb_keyboard_only && !attached);
+    assert(usb_xinput_mode() && !usb_keyboard_only && !attached && !usb_sleep_mode);
     usb_gamepad_toggle_mode();
     assert(!usb_xinput_mode() && usb_keyboard_only && attached);
 

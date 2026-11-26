@@ -60,6 +60,7 @@ void usb_gamepad_toggle_mode() {
     set_mode(usb_xinput_mode() ? UsbGamepadMode::DualSense
                                : UsbGamepadMode::XInput);
     usb_keyboard_only = !controller_connected && !usb_xinput_mode() && get_config().enable_wake;
+    usb_sleep_mode = false;
     usb_reconfiguring = true;
 
     // Without a controller, expose only the native wake keyboard when enabled.
@@ -88,6 +89,7 @@ void usb_gamepad_task() {
     set_mode(UsbGamepadMode::DualSense);
     reset_to_dualsense_pending = false;
     usb_keyboard_only = !controller_connected && get_config().enable_wake;
+    usb_sleep_mode = false;
     usb_reconfiguring = true;
 
     if (controller_connected || usb_keyboard_only) {

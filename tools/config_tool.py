@@ -118,7 +118,8 @@ TRIGGER_TAP = 0xFD        # src/config.h SHORTCUT_TRIGGER_TAP
 TRIGGER_DOUBLE_TAP = 0xFE # src/config.h SHORTCUT_TRIGGER_DOUBLE_TAP
 SHORTCUT_FLAG_DOUBLE_TAP = 0x01 # src/config.h SHORTCUT_FLAG_DOUBLE_TAP (chords only)
 SHORTCUT_FLAG_HOLD = 0x02
-SHORTCUT_FLAG_MASK = SHORTCUT_FLAG_DOUBLE_TAP | SHORTCUT_FLAG_HOLD
+SHORTCUT_FLAG_MODIFIER_HOLD = 0x04
+SHORTCUT_FLAG_MASK = SHORTCUT_FLAG_DOUBLE_TAP | SHORTCUT_FLAG_HOLD | SHORTCUT_FLAG_MODIFIER_HOLD
 SHORTCUT_ACTION_KEYBOARD = 0
 SHORTCUT_ACTION_BT_DISCONNECT = 1
 SHORTCUT_ACTION_CONSUMER = 2
@@ -245,11 +246,12 @@ FIELDS = [
     ("speaker_select",     "u8",    lambda v: v in (0, 1, 2, 3), "0:auto 1:builtin 2:headphone 3:disable"),
     ("enable_wake",        "u8",    lambda v: v in (0, 1),       "0/1 (wake host on PS press)"),
     ("trigger_reduce",     "u8",    lambda v: 0 <= v <= 10,      "[0, 10] (0: auto)"),
-    ("lock_volume",        "u8",    lambda v: v in (0, 1),       "0/1 (ignore the volume change from SetStateData(game or software))"),
+    ("lock_volume",        "u8",    lambda v: v in (0, 1, 2),    "0:off 1:game/software (HID) 2:system volume (UAC)"),
     ("status_gpio_pin",    "u8",    lambda v: 0 <= v <= 255,     "GPIO number (255 disables; firmware rejects board-reserved pins)"),
     ("status_gpio_mode",   "u8",    lambda v: v in (0, 1),       "0:pull high 1:200ms button pulse"),
     ("packet_mode",        "u8",    lambda v: v in (0, 1),       "0:double packet 1:single packet"),
     ("disconnect_on_dock", "u8",    lambda v: v in (0, 1),       "0/1 (drop the BT link while the controller sits on a charger/dock)"),
+    ("sleep_on_dock",      "u8",    lambda v: v in (0, 1),       "0/1 (suspend host PC when the controller sits on a dock)"),
 ]
 FIELD_NAMES = [f[0] for f in FIELDS]
 # Little-endian, no padding -- matches __attribute__((packed)) Config_body.
@@ -328,9 +330,13 @@ def read_config(dev):
         sys.exit(f"Failed reading config report 0x{REPORT_GET_CONFIG:02X}: {exc}")
     if not data:
         sys.exit("Empty response reading config (report 0xF7). Is the firmware current?")
-    body = bytes(data[1:1 + BODY_SIZE]) if data[0] == REPORT_GET_CONFIG else bytes(data[:BODY_SIZE])
-    if len(body) < BODY_SIZE:
-        sys.exit(f"Short config read: got {len(body)} bytes, expected {BODY_SIZE}.")
+    raw_body = bytes(data[1:]) if data[0] == REPORT_GET_CONFIG else bytes(data)
+    if len(raw_body) < 24:
+        sys.exit(f"Short config read: got {len(raw_body)} bytes, expected at least 24.")
+    # If reading from older firmware that lacks newer fields (e.g. sleep_on_dock), pad with 0
+    if len(raw_body) < BODY_SIZE:
+        raw_body = raw_body + b"\x00" * (BODY_SIZE - len(raw_body))
+    body = raw_body[:BODY_SIZE]
     return unpack_config(body)
 
 def read_version(dev):
@@ -622,11 +628,16 @@ def format_keyboard_chord(modifiers, keys):
 
 
 def shortcut_slot_valid(shortcut):
-    """Mirror of shortcut_slot_valid() in src/config.cpp."""
+    """Mirror of shortcut_slot_valid() in src/button_shortcut.cpp."""
     trigger_a, trigger_b, action, payload, flags = shortcut
     if trigger_a >= BUTTON_SOURCE_COUNT:
         return False
     if flags & ~SHORTCUT_FLAG_MASK:
+        return False
+    if flags & SHORTCUT_FLAG_MODIFIER_HOLD and (
+        flags != SHORTCUT_FLAG_MODIFIER_HOLD or action != SHORTCUT_ACTION_KEYBOARD
+        or trigger_b >= BUTTON_SOURCE_COUNT or payload[0] == 0 or payload[1] < 0x04
+    ):
         return False
     if flags & SHORTCUT_FLAG_HOLD and (
         action != SHORTCUT_ACTION_KEYBOARD or flags & SHORTCUT_FLAG_DOUBLE_TAP
@@ -664,7 +675,9 @@ def print_shortcuts(button, indent="  "):
             triggers = f"{button_name(trigger_a)}+{button_name(trigger_b)}"
             if flags & SHORTCUT_FLAG_DOUBLE_TAP:
                 triggers += "*2"
-        if flags & SHORTCUT_FLAG_HOLD:
+        if flags & SHORTCUT_FLAG_MODIFIER_HOLD:
+            triggers += "@modifier_hold"
+        elif flags & SHORTCUT_FLAG_HOLD:
             triggers += "@hold"
         if action == SHORTCUT_ACTION_BT_DISCONNECT:
             output = "bt_disconnect"
@@ -703,13 +716,19 @@ def parse_shortcut_assignment(token):
     if ":" not in definition:
         sys.exit(f"Bad shortcut '{token}', missing ':' between controller trigger and output.")
     trigger_raw, output_raw = definition.split(":", 1)
-    hold = trigger_raw.strip().lower().endswith("@hold")
-    if hold:
-        trigger_raw = trigger_raw.strip()[:-5]
+    mode = ""
+    if "@" in trigger_raw:
+        trigger_raw, mode = trigger_raw.strip().rsplit("@", 1)
+        mode = mode.lower()
+        if mode not in ("hold", "modifier_hold"):
+            sys.exit(f"Unknown shortcut mode '@{mode}', expected @hold or @modifier_hold.")
         if "*" in trigger_raw:
-            sys.exit("@hold is separate from single/double tap syntax.")
+            sys.exit(f"@{mode} is separate from single/double tap syntax.")
     triggers = [part.strip() for part in trigger_raw.split("+") if part.strip()]
-    flags = SHORTCUT_FLAG_HOLD if hold else 0
+    flags = (SHORTCUT_FLAG_MODIFIER_HOLD if mode == "modifier_hold"
+             else SHORTCUT_FLAG_HOLD if mode == "hold" else 0)
+    if mode == "modifier_hold" and len(triggers) != 2:
+        sys.exit("@modifier_hold requires two controller buttons: A holds modifiers, B controls the key.")
     if len(triggers) == 1:
         # A lone button is a tap trigger; a trailing "*2" asks for a double tap.
         name = triggers[0]
@@ -743,8 +762,8 @@ def parse_shortcut_assignment(token):
         sys.exit("A shortcut needs one button (tap trigger) or two buttons (chord).")
 
     action_name = normalize_button_name(output_raw)
-    if hold and (action_name in CONSUMER_NAMES or action_name in ("btdisconnect", "disconnect")):
-        sys.exit("@hold supports keyboard keys and keyboard shortcuts only.")
+    if mode and (action_name in CONSUMER_NAMES or action_name in ("btdisconnect", "disconnect")):
+        sys.exit(f"@{mode} supports keyboard keys and keyboard shortcuts only.")
     if action_name in ("btdisconnect", "disconnect"):
         return slot, (trigger_ids[0], trigger_ids[1],
                       SHORTCUT_ACTION_BT_DISCONNECT, [0] * SHORTCUT_PAYLOAD_SIZE, flags)
@@ -767,6 +786,8 @@ def parse_shortcut_assignment(token):
     if not modifiers and not keys:
         sys.exit("The keyboard chord cannot be empty.")
     key = keys[0] if keys else 0
+    if mode == "modifier_hold" and (not modifiers or not key):
+        sys.exit("@modifier_hold requires at least one modifier and one ordinary key.")
     return slot, (trigger_ids[0], trigger_ids[1], SHORTCUT_ACTION_KEYBOARD,
                   [modifiers, key, 0], flags)
 
@@ -835,6 +856,7 @@ def main():
   python tools/config_tool.py shortcut 6=PS*2:Win+Tab
   python tools/config_tool.py shortcut "1=Cross@hold:Space"
   python tools/config_tool.py shortcut "2=L1@hold:Ctrl+C"
+  python tools/config_tool.py shortcut "3=L1+R1@modifier_hold:Alt+Tab"
   python tools/config_tool.py shortcut 1=off""",
     )
     p_shortcut.add_argument(

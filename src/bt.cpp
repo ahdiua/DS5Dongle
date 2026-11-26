@@ -25,6 +25,7 @@
 #include "usb_mode.h"
 #include "xinput.h"
 #include "usb.h"
+#include "button_shortcut.h"
 #include "pico/util/queue.h"
 #include "pico/time.h"
 #include "pico/platform.h"
@@ -639,7 +640,7 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             // Hide a native USB device when no controller is paired, except when wake is on or
             // while the host is suspended. XInput detach and reset are handled below by
             // usb_gamepad_task(), which can defer them safely until the host resumes.
-            if (!usb_xinput_mode() && !get_config().enable_wake && !tud_suspended()) {
+            if (!usb_xinput_mode() && !get_config().enable_wake && !tud_suspended() && !host_sleep_in_progress()) {
                 tud_disconnect();
             }
 #endif
@@ -656,7 +657,7 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             wake_on_bt_disconnect();
             gpio_on_disconnect();
 #if !ENABLE_SERIAL
-            if (!usb_xinput_mode() && get_config().enable_wake && !tud_suspended()) {
+            if (!usb_xinput_mode() && get_config().enable_wake && !tud_suspended() && !host_sleep_in_progress()) {
                 usb_reconnect(true);
             }
 #endif
@@ -739,7 +740,9 @@ static void __not_in_flash_func(l2cap_packet_handler)(uint8_t packet_type, uint1
                         is_dse = false;
                     }
 #if !ENABLE_SERIAL
-                    usb_reconnect(false);
+                    if (!wake_defer_usb_reconnect()) {
+                        usb_reconnect(false);
+                    }
 #endif
                 }
             }

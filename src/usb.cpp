@@ -2,8 +2,6 @@
 // Created by awalol on 2026/3/4.
 //
 
-#include <algorithm>
-
 #include "bt.h"
 #include "tusb.h"
 #include "bsp/board_api.h"
@@ -13,9 +11,12 @@
 #include "wake.h"
 #include "audio.h"
 #include "pico/time.h"
+#include "hardware/watchdog.h"
 
 // USB descriptor mode: true exposes only the wake keyboard; false exposes the full device.
 bool usb_keyboard_only = false;
+// True when re-enumerated into keyboard + System Control mode to send a host sleep pulse.
+bool usb_sleep_mode = false;
 // True from deliberate USB disconnect until remount, preventing reports to stale HID interfaces.
 bool usb_reconfiguring = false;
 
@@ -25,12 +26,22 @@ void usb_reconnect(bool keyboard_only) {
     wake_note_usb_reconnect();
     tud_disconnect();
     usb_keyboard_only = keyboard_only;
+    if (!keyboard_only) {
+        usb_sleep_mode = false;
+    }
     usb_reconfiguring = true;
     extern bool spk_active;
     spk_active = false;
     set_mic_active(false);
-    sleep_ms(150);
+    watchdog_update();
+    sleep_ms(300);
+    watchdog_update();
     tud_connect();
+}
+
+void usb_reconnect_sleep() {
+    usb_sleep_mode = true;
+    usb_reconnect(true);
 }
 
 uint8_t mute[2] = {}; // 0: SPEAKER(0x02) 1: MIC(0x05)
@@ -78,6 +89,12 @@ static bool audio10_set_req_entity(tusb_control_request_t const *p_request, uint
                         // Only 1st form is supported
                         TU_VERIFY(p_request->wLength == 1);
 
+                        // Acknowledge host controls while locked, but preserve both
+                        // the reported USB state and the controller's mute state.
+                        if (get_config().lock_volume == 2) {
+                            return true;
+                        }
+
                         mute[index] = pBuff[0];
 
                         SetStateData state = {
@@ -101,6 +118,12 @@ static bool audio10_set_req_entity(tusb_control_request_t const *p_request, uint
                     case AUDIO10_CS_REQ_SET_CUR:
                         // Only 1st form is supported
                         TU_VERIFY(p_request->wLength == 2);
+
+                        // Windows device volume uses UAC SET_CUR rather than the
+                        // HID output report filtered in forward_output_report().
+                        if (get_config().lock_volume == 2) {
+                            return true;
+                        }
 
                         volume[index] = static_cast<float>(*reinterpret_cast<int16_t const *>(pBuff)) / 256;
                         if (entityID == UAC1_ENTITY_SPK_FEATURE_UNIT) {
@@ -156,9 +179,8 @@ static bool audio10_get_req_entity(uint8_t rhport, tusb_control_request_t const 
                 switch (p_request->bRequest) {
                     case AUDIO10_CS_REQ_GET_CUR:
                         TU_LOG2("    Get Volume of entity: %u\r\n", entityID); {
-                            if (entityID == UAC1_ENTITY_SPK_FEATURE_UNIT) {
-                                volume[index] = -100.0f + std::min(static_cast<int>(get_config().speaker_volume),100);
-                            }
+                            // Report the last accepted value, including while
+                            // locked; a read must not change the held volume.
                             int16_t vol = volume[index] * 256; // convert to 1/256 dB units
                             return tud_audio_buffer_and_schedule_control_xfer(rhport, p_request, &vol, sizeof(vol));
                         }

@@ -52,7 +52,7 @@ XInput 模式适用于需要 Xbox 手柄的 Windows 10/11 游戏，支持常规�
 500 Hz 或实时）；由于 XInput 模式下无法使用网页配置，请先在原生 DualSense
 模式中设置回报率。XInput 选择只在当前手柄连接期间有效；手柄断开、切换手柄、
 重启或断电后都会自动恢复原生 DualSense 模式，再次单击也可立即切回。XInput
-模式不支持“按 PS 键唤醒”。该模式仅面向 Windows PC，不能让适配器连接 Xbox
+模式不支持“按 PS 键唤醒”和“放回底座使电脑休眠”。该模式仅面向 Windows PC，不能让适配器连接 Xbox
 主机。
 
 # Pico 配置调整
@@ -60,6 +60,18 @@ XInput 模式适用于需要 Xbox 手柄的 Windows 10/11 游戏，支持常规�
 
 - 用于正式固件: https://ds5.awalol.eu.org
 - 用于测试固件: https://ds5-dev.awalol.eu.org
+
+**忽略音量调节**（`lock_volume`）支持三种模式：
+
+- `0`：关闭。
+- `1`：游戏/软件——忽略 HID 输出报文中的音量、静音修改，仍可通过系统 USB Audio 调节。
+- `2`：UAC（系统音量）——忽略 USB Audio 的音量、静音修改（包括 Windows 设备音量），
+  游戏/软件的 HID 控制仍然生效。
+
+两种忽略模式均覆盖扬声器、耳机和麦克风。请先设置好设备音量和静音状态，再选择忽略 UAC 调节。
+USB Audio 查询会返回最后一次接受的 USB Audio 值。Windows 滑块可能仍会移动，因为主机
+可能缓存自己请求的值。忽略 UAC 调节无法阻止游戏或 Windows 应用音量混合器在音频到达适配器之前
+对音频采样进行衰减。
 
 ### Pico W 版本
 

@@ -46,6 +46,7 @@ constexpr absolute_time_t nil_time = 0;
 inline uint64_t now = 0;
 inline auto make_timeout_time_ms(uint32_t ms) { return now + ms; }
 inline bool time_reached(absolute_time_t t) { return now >= t; }
+inline bool is_nil_time(absolute_time_t t) { return t == nil_time; }
 constexpr uint8_t Disable = 27, DPadNorthWest = 7;
 struct USBGetStateData { uint32_t buttons = 0; };
 inline bool button_is_pressed(const USBGetStateData& s, uint8_t b) {
@@ -55,6 +56,13 @@ struct Button { ButtonShortcut shortcuts[BUTTON_SHORTCUT_COUNT]{}; };
 inline Button config;
 inline Button& get_button() { return config; }
 inline bool bt_disconnect() { return true; }
+inline bool bt_is_connected() { return true; }
+struct Config { bool enable_wake = false; };
+inline Config settings;
+inline Config& get_config() { return settings; }
+inline bool usb_sleep_mode = false;
+inline void usb_reconnect_sleep() { usb_sleep_mode = true; }
+inline void tud_disconnect() {}
 inline bool usb_keyboard_only = false, usb_reconfiguring = false;
 inline bool ready = true, accept = true, mounted = true, suspended = false;
 inline bool tud_mounted() { return mounted; }
