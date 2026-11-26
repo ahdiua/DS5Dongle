@@ -29,6 +29,7 @@
 #include "usb_mode.h"
 #include "usb_descriptors.h"
 #include "usb.h"
+#include "xinput_descriptors.h"
 
 #ifndef ENABLE_SERIAL
 #define ENABLE_SERIAL 0
@@ -145,32 +146,10 @@ tusb_desc_device_t desc_device =
     .bNumConfigurations = 0x01
 };
 
-// Wired Xbox 360-compatible identity used only for the runtime XInput mode.
-// The interface descriptor below, rather than HID, is what binds Windows to
-// its built-in XUSB driver.
-tusb_desc_device_t const desc_device_xinput = {
-    .bLength = sizeof(tusb_desc_device_t),
-    .bDescriptorType = TUSB_DESC_DEVICE,
-    .bcdUSB = 0x0200,
-    .bDeviceClass = 0xFF,
-    .bDeviceSubClass = 0xFF,
-    .bDeviceProtocol = 0xFF,
-    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
-    .idVendor = 0x045E,
-    .idProduct = 0x028E,
-    .bcdDevice = 0x0572,
-    .iManufacturer = STRID_MANUFACTURER,
-    .iProduct = STRID_PRODUCT,
-    .iSerialNumber = STRID_SERIAL,
-    .bNumConfigurations = 0x01,
-};
-
 // Invoked when received GET DEVICE DESCRIPTOR
 // Application return pointer to descriptor
 uint8_t const *tud_descriptor_device_cb(void) {
-    if (usb_xinput_mode()) {
-        return reinterpret_cast<uint8_t const *>(&desc_device_xinput);
-    }
+    if (usb_xinput_mode()) return xinput_device_descriptor();
     desc_device.idProduct = ds_mode() ? 0x0CE6 : 0x0DF2;
     desc_device.iSerialNumber = get_config().enable_usb_sn ? 0x03 : 0x00;
     // USB 2.1 (so the host requests the BOS / MS OS 2.0 selective-suspend opt-in)
@@ -495,43 +474,6 @@ uint8_t descriptor_configuration[] = {
 #endif
 };
 
-// Xbox 360 wired-controller interface. The 16-byte class-specific descriptor
-// and endpoint layout match the protocol consumed by Windows' XUSB driver.
-uint8_t descriptor_configuration_xinput[] = {
-    0x09, TUSB_DESC_CONFIGURATION,
-    0x30, 0x00, // wTotalLength = 48
-    0x01,       // bNumInterfaces
-    0x01,       // bConfigurationValue
-    0x00,       // iConfiguration
-    0x80,       // bus powered
-    0xFA,       // 500 mA
-
-    0x09, TUSB_DESC_INTERFACE,
-    0x00,       // bInterfaceNumber
-    0x00,       // bAlternateSetting
-    0x02,       // IN + OUT endpoints
-    0xFF,       // vendor-specific
-    0x5D,       // XInput subclass
-    0x01,       // XInput protocol
-    0x00,       // iInterface
-
-    0x10, 0x21, 0x10, 0x01, 0x01, 0x24, 0x81, 0x14,
-    0x03, 0x00, 0x03, 0x13, 0x02, 0x00, 0x03, 0x00,
-
-    0x07, TUSB_DESC_ENDPOINT,
-    0x81,       // EP1 IN
-    0x03,       // interrupt
-    0x20, 0x00, // 32 bytes
-    0x04,       // 4 ms
-
-    0x07, TUSB_DESC_ENDPOINT,
-    0x02,       // EP2 OUT
-    0x03,       // interrupt
-    0x20, 0x00, // 32 bytes
-    0x08,       // 8 ms
-};
-static_assert(sizeof(descriptor_configuration_xinput) == 48);
-constexpr uint8_t XINPUT_IN_INTERVAL_OFFSET = 40;
 #ifdef ENABLE_WAKE_HID
 static uint8_t const descriptor_keyboard_only[] = {
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN,
@@ -590,10 +532,7 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
         return usb_sleep_mode ? descriptor_keyboard_sleep : descriptor_keyboard_only;
     }
 #endif
-    if (usb_xinput_mode()) {
-        descriptor_configuration_xinput[XINPUT_IN_INTERVAL_OFFSET] = polling_interval();
-        return descriptor_configuration_xinput;
-    }
+    if (usb_xinput_mode()) return xinput_configuration_descriptor(polling_interval());
     const auto bInterval = polling_interval();
     constexpr auto offset = CONFIG_DESC_LEN_BASE;
     descriptor_configuration[offset - 1] = bInterval;
@@ -1110,7 +1049,6 @@ static_assert(sizeof(desc_hid_report_system_control) == 31, "system control repo
 // Application return pointer to descriptor
 // Descriptor contents must exist long enough for transfer to complete
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t itf) {
-    if (usb_xinput_mode()) return nullptr;
 #ifdef ENABLE_WAKE_HID
     // Keyboard-only mode exposes HID instance 0 (and instance 1 for System Control during sleep_on_dock).
     // Composite mode uses instance 0 (gamepad), 1 (keyboard), and 2 (consumer).
@@ -1146,15 +1084,13 @@ static uint16_t _desc_str[60 + 1];
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     (void) langid;
     size_t chr_count;
-
     if (usb_xinput_mode()) {
-        string_desc_arr[1] = "DS5Dongle";
-        string_desc_arr[2] = "Xbox 360 Controller";
-    } else if (ds_mode()) {
-        string_desc_arr[1] = "Sony Interactive Entertainment";
+        if (uint16_t const *desc = xinput_string_descriptor(index)) return desc;
+    }
+
+    if (ds_mode()) {
         string_desc_arr[2] = "DualSense Wireless Controller";
     }else {
-        string_desc_arr[1] = "Sony Interactive Entertainment";
         string_desc_arr[2] = "DualSense Edge Wireless Controller";
     }
 
@@ -1240,7 +1176,7 @@ uint8_t const desc_bos[] = {
 uint8_t const *tud_descriptor_bos_cb(void) {
     // BOS carries the MS OS 2.0 selective-suspend opt-in, only meaningful for wake.
     // When wake is off the device is USB 2.0 and the host won't ask -- guard anyway.
-    if (usb_xinput_mode() || !get_config().enable_wake) return nullptr;
+    if (!get_config().enable_wake) return nullptr;
     return desc_bos;
 }
 
@@ -1285,7 +1221,7 @@ TU_VERIFY_STATIC(sizeof(desc_ms_os_20) == MS_OS_20_DESC_LEN, "MS OS 2.0 descript
 // platform capability, then issues this vendor request to fetch the
 // descriptor set itself.
 bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *request) {
-    if (usb_xinput_mode() || !get_config().enable_wake) return false;
+    if (!get_config().enable_wake) return false;
     if (stage != CONTROL_STAGE_SETUP) return true;
     if (request->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR) return false;
     if (request->bRequest == MS_OS_20_VENDOR_CODE && request->wIndex == 7) {

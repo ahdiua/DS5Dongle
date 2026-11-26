@@ -119,6 +119,7 @@ add_executable(ds5-bridge
         src/button_functions.cpp
         src/usb_mode.cpp
         src/xinput.cpp
+        src/xinput_descriptors.cpp
         src/config.cpp
         src/status_gpio.cpp
         src/cmd.cpp
