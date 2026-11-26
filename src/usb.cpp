@@ -254,11 +254,6 @@ bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p
     return audio10_set_req_entity(p_request, buf);
 }
 
-void tud_hid_report_complete_cb(uint8_t instance, uint8_t const *report, uint16_t len) {
-    (void) instance;
-    (void) len;
-}
-
 #ifndef ENABLE_WAKE_HID
 
 void tud_suspend_cb(bool remote_wakeup_en) {

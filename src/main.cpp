@@ -18,6 +18,9 @@
 #endif
 #include "wake.h"
 #include "usb.h"
+#include "usb_descriptors.h"
+#include "usb_in_pacer.h"
+#include "tusb.h"
 #include "button_shortcut.h"
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
@@ -40,46 +43,77 @@ bool spk_active = false;
 
 USBGetStateData interrupt_in_data{};
 
+// Fresh Bluetooth input not yet armed on the gamepad IN endpoint.
 bool report_dirty = false;
 
-void __not_in_flash_func(interrupt_loop)() {
-    if (usb_keyboard_only || usb_reconfiguring) return;
-    if (usb_xinput_mode()) {
-        xinput_task();
+// Real-time (mode 3) arms fresh input the moment it arrives. The fixed rates
+// arm just before the predicted host poll with the newest state, re-sending
+// the last one if nothing new arrived so the report rate stays constant.
+static UsbInPacer native_in_pacer;
+
+static void __not_in_flash_func(native_input_service)() {
+    if (usb_keyboard_only || usb_reconfiguring || !tud_ready()) {
+        native_in_pacer.reset();
         return;
     }
     if (!tud_hid_ready()) return;
 
-    // TODO: Refactor for better code reuse
-    if (get_config().polling_rate_mode != 3) {
-        USBGetStateData report = interrupt_in_data;
-        button_remap_apply(report);
-        if (!tud_hid_report(0x01, &report, sizeof(report))) {
-            printf("[USBHID] tud_hid_report error\n");
-        }
+    const bool real_time = get_config().polling_rate_mode == 3;
+    native_in_pacer.configure(real_time ? UsbInPacer::Policy::Immediate
+                                        : UsbInPacer::Policy::JustInTime,
+                              polling_interval() * 1000u, !real_time);
+    const uint64_t now = time_us_64();
+    if (!native_in_pacer.want_arm(now, report_dirty)) return;
+
+    USBGetStateData report = interrupt_in_data;
+    button_remap_apply(report);
+    if (!tud_hid_report(0x01, &report, sizeof(report))) {
+        // report_dirty stays set; retried on the next service call.
+        printf("[USBHID] tud_hid_report error\n");
         return;
     }
+    report_dirty = false;
+    native_in_pacer.on_armed(now);
+}
 
-    bool should_send = false;
-    USBGetStateData report{};
+// TinyUSB calls this from tud_task() after the host took an IN report; the
+// endpoint is already idle again. Input that arrived meanwhile goes out now,
+// and the completion time anchors the host poll phase.
+void __not_in_flash_func(tud_hid_report_complete_cb)(uint8_t instance, uint8_t const *report,
+                                                     uint16_t len) {
+    (void) report;
+    (void) len;
+    // The gamepad is instance 0 of the full composite device; keyboard-only
+    // mode reuses instance 0 for the wake keyboard.
+    if (usb_keyboard_only || instance != 0) return;
+    native_in_pacer.on_complete(time_us_64());
+    native_input_service();
+}
 
-    if (report_dirty) {
-        report = interrupt_in_data;
-        report_dirty = false;
-        should_send = true;
+#if ENABLE_VERBOSE
+static void log_input_pacer_stats() {
+    static uint64_t next_log_us = 0;
+    const uint64_t now = time_us_64();
+    if (now < next_log_us) return;
+    next_log_us = now + 5000000;
+    const UsbInPacer::Stats s = usb_xinput_mode() ? xinput_pacer_stats()
+                                                  : native_in_pacer.stats();
+    printf("[USBHID] pacer arms=%lu scheduled=%lu misses=%lu margin=%luus\n",
+           (unsigned long) s.arms, (unsigned long) s.scheduled,
+           (unsigned long) s.misses, (unsigned long) s.margin_us);
+}
+#endif
+
+// Once per main-loop pass: drives the just-in-time deadlines and retries.
+void __not_in_flash_func(interrupt_loop)() {
+#if ENABLE_VERBOSE
+    log_input_pacer_stats();
+#endif
+    if (usb_xinput_mode()) {
+        if (!usb_keyboard_only && !usb_reconfiguring) xinput_task();
+        return;
     }
-
-    // Only send to TinyUSB if we actually grabbed fresh data
-    if (should_send) {
-        button_remap_apply(report);
-        if (!tud_hid_report(0x01, &report, sizeof(report))) {
-            printf("[USBHID] tud_hid_report error\n");
-
-            // If the report failed to queue, restore the dirty flag 
-            // so we try again on the next loop iteration.
-            report_dirty = true;
-        }
-    }
+    native_input_service();
 }
 
 void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16_t len) {
@@ -168,17 +202,13 @@ void __not_in_flash_func(on_bt_data)(CHANNEL_TYPE channel, uint8_t *data, uint16
             return;
         }
 
-        if (get_config().polling_rate_mode != 3) {
-#if ENABLE_BATT_LED
-            battery_led_note_report();
-#endif
-            return;
-        }
-
         report_dirty = true;
 #if ENABLE_BATT_LED
         battery_led_note_report();
 #endif
+        // Arm right away if the pacer allows it, instead of waiting for the
+        // rest of this main-loop pass (audio etc.) to reach interrupt_loop().
+        native_input_service();
     }
 }
 

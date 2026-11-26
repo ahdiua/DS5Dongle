@@ -12,4 +12,8 @@ constexpr uint16_t BUTTON_REPORT_SIZE = 63;
 constexpr uint8_t SHORTCUT_KEY_USAGE_MAX = 0x73; // Keyboard F24
 constexpr uint16_t SHORTCUT_CONSUMER_USAGE_MAX = 0x02FF;
 
+// bInterval (in 1 ms frames) of the gamepad interrupt endpoints for the
+// configured polling_rate_mode; shared by the DualSense and XInput descriptors.
+uint8_t polling_interval();
+
 #endif //DS5_BRIDGE_USB_DESCRIPTORS_H

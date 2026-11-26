@@ -112,8 +112,11 @@ motion sensors, controller audio, adaptive triggers, and the web configuration
 interface are not exposed while this mode is active.
 
 The XInput input endpoint follows the saved polling-rate setting (250 Hz,
-500 Hz, or real-time). Configure it in native DualSense mode before switching
-to XInput because the web configuration interface is unavailable in XInput mode.
+500 Hz, 1000 Hz, or real-time) and only sends fresh input: real-time arms a
+report as soon as it arrives, while the fixed rates arm the newest state just
+before the host's next poll. Pick real-time for the lowest latency. Configure it
+in native DualSense mode before switching to XInput because the web
+configuration interface is unavailable in XInput mode.
 
 The selection is deliberately temporary and lasts only for the current controller
 connection. Disconnecting the controller, switching controllers, rebooting, or
