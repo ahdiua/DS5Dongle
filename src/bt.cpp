@@ -299,12 +299,12 @@ void bt_blacklist_persist_if_dirty() {
     bt_blacklist_persist();
 }
 
-// BOOTSEL controller action: trigger a fresh inquiry to pair another controller.
+// BOOTSEL click action: trigger a fresh inquiry to pair another controller.
 // If currently connected, disconnect (which triggers inquiry restart via the
 // disconnect handler) - link key is preserved so the disconnected controller
 // can still reconnect later.
-void bt_bootsel_controller_action() {
-    printf("[BT] BOOTSEL controller action - fresh inquiry\n");
+void bt_bootsel_click_action() {
+    printf("[BT] BOOTSEL click - fresh inquiry\n");
     if (hid_interrupt_cid != 0) {
         bt_disconnect();
     } else {
@@ -637,9 +637,11 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
 #if !ENABLE_SERIAL
-            // Hide a native USB device when no controller is paired, except when wake is on or
-            // while the host is suspended. XInput detach and reset are handled below by
-            // usb_gamepad_task(), which can defer them safely until the host resumes.
+            // Hide the USB device when no controller is paired (upstream behavior), EXCEPT when
+            // wake is on (stay on the bus so a returning controller can signal a host wake) or
+            // while the host is suspended -- hiding then re-showing re-enumerates, and a USB
+            // re-connect wakes a sleeping host. Defer the hide until the host is awake.
+            // XInput: detach and reset are deferred by usb_gamepad_task() instead.
             if (!usb_xinput_mode() && !get_config().enable_wake && !tud_suspended() && !host_sleep_in_progress()) {
                 tud_disconnect();
             }
@@ -654,8 +656,8 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             bt_rssi = 0;
             hid_control_cid = 0;
             hid_interrupt_cid = 0;
-            wake_on_bt_disconnect();
             gpio_on_disconnect();
+            wake_on_bt_disconnect();
 #if !ENABLE_SERIAL
             if (!usb_xinput_mode() && get_config().enable_wake && !tud_suspended() && !host_sleep_in_progress()) {
                 usb_reconnect(true);

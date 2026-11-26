@@ -177,7 +177,7 @@ extern "C" void tud_suspend_cb(bool remote_wakeup_en) {
     host_suspended = true;
     host_resumed_event = false;
     reconnect_retries = 0;
-
+    
     // XInput mode intentionally has no wake-keyboard interface or remote-wake
     // descriptor. Keep the suspend power-off debounce, but do not arm the HID
     // wake state machine.
@@ -335,7 +335,6 @@ void wake_task(void) {
 
     if (usb_xinput_mode()) return;
 
-    // The wake-UP FSM below only runs when wake is enabled.
     if (!get_config().enable_wake) return;
 
     critical_section_enter_blocking(&wake_cs);

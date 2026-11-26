@@ -85,7 +85,7 @@ static void button_dispatch(int clicks) {
         printf("[BTN] BOOTSEL click - %s mode\n",
                usb_xinput_mode() ? "XInput" : "DualSense");
     } else if (clicks == 2) {
-        bt_bootsel_controller_action(); // double click -> pair / switch controller
+        bt_bootsel_click_action(); // double click -> pair / switch controller
     } else if (clicks == 3) {
         // triple click -> normal reboot. A Cortex-M33 SYSRESETREQ does a warm
         // reset that re-runs the flash app; a watchdog reset instead drops the

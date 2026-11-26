@@ -7,7 +7,7 @@
 
 // Poll the BOOTSEL button at 10 Hz and dispatch gestures:
 //   single click  -> toggle DualSense / XInput USB mode
-//   double click  -> pair another controller   (bt_bootsel_controller_action)
+//   double click  -> pair another controller   (bt_bootsel_click_action)
 //   triple click  -> reboot the Pico
 //   four clicks   -> reboot into BOOTSEL
 //   ~1.5 s hold   -> clear all pairings         (bt_bootsel_hold_action)
