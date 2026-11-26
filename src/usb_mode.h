@@ -15,9 +15,10 @@ bool usb_xinput_mode();
 // written to flash and only lasts for the current controller connection.
 void usb_gamepad_toggle_mode();
 
-// Schedule XInput to return to the native identity after the controller link
-// ends. The actual USB detach is deferred while the host bus is suspended.
+// Call first thing when the Bluetooth link ends. XInput switches back to the
+// native identity right away; the upstream disconnect / resume handling that
+// follows then hides the device or re-exposes the wake keyboard, deferring the
+// re-enumeration while the host is suspended exactly as for native mode.
 void usb_gamepad_on_controller_disconnect();
-void usb_gamepad_task();
 
 #endif // DS5_BRIDGE_USB_MODE_H

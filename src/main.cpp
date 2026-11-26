@@ -443,7 +443,6 @@ int main() {
 #endif
         cyw43_arch_poll();
         tud_task();
-        usb_gamepad_task();
         wake_task();
         if (!usb_xinput_mode()) button_shortcut_task();
         audio_loop();

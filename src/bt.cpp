@@ -23,7 +23,6 @@
 #include "fake_ds5.h"
 #include "wake.h"
 #include "usb_mode.h"
-#include "xinput.h"
 #include "usb.h"
 #include "button_shortcut.h"
 #include "pico/util/queue.h"
@@ -636,17 +635,16 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
         }
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
+            usb_gamepad_on_controller_disconnect(); // fork: XInput ends with the connection
 #if !ENABLE_SERIAL
             // Hide the USB device when no controller is paired (upstream behavior), EXCEPT when
             // wake is on (stay on the bus so a returning controller can signal a host wake) or
             // while the host is suspended -- hiding then re-showing re-enumerates, and a USB
             // re-connect wakes a sleeping host. Defer the hide until the host is awake.
-            // XInput: detach and reset are deferred by usb_gamepad_task() instead.
-            if (!usb_xinput_mode() && !get_config().enable_wake && !tud_suspended() && !host_sleep_in_progress()) {
+            if (!get_config().enable_wake && !tud_suspended() && !host_sleep_in_progress()) {
                 tud_disconnect();
             }
 #endif
-            usb_gamepad_on_controller_disconnect();
             gap_connectable_control(1);
             gap_discoverable_control(1);
             const uint8_t reason = hci_event_disconnection_complete_get_reason(packet);
@@ -659,7 +657,7 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
             gpio_on_disconnect();
             wake_on_bt_disconnect();
 #if !ENABLE_SERIAL
-            if (!usb_xinput_mode() && get_config().enable_wake && !tud_suspended() && !host_sleep_in_progress()) {
+            if (get_config().enable_wake && !tud_suspended() && !host_sleep_in_progress()) {
                 usb_reconnect(true);
             }
 #endif
@@ -671,10 +669,6 @@ static void __not_in_flash_func(hci_packet_handler)(uint8_t packet_type, uint16_
 #endif
             printf("[HCI] Disconnected reason=0x%02X\n", reason);
             bt_data_callback(INTERRUPT, const_cast<uint8_t *>(state_init_data), sizeof(state_init_data));
-            // state_init_data intentionally resembles a neutral DualSense
-            // packet, but its sticks are not exactly 0x80. XInput requires an
-            // exact zeroed report once the controller is gone.
-            xinput_reset_input();
             // gap_inquiry_start(30);
             // bt_inquiring = true;
             break;

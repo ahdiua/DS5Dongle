@@ -16,6 +16,7 @@
 #include "pico/time.h"
 #include "button_shortcut.h"
 #include "config.h"
+#include "usb_mode.h"
 
 
 #define WAKE_KBD_INSTANCE     usb_keyboard_instance()
@@ -92,6 +93,9 @@ static void enter_state(wake_state_t s) {
 }
 
 static void request_host_wake(const char *reason) {
+    // fork: XInput advertises no remote wakeup, so never signal resume for it
+    // (the forced DCD wake below would otherwise bypass that).
+    if (usb_xinput_mode()) return;
     bool ok = tud_remote_wakeup();
 
     // Linux quirk: Sometimes Linux fails to set the REMOTE_WAKEUP feature
