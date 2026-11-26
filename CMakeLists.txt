@@ -118,6 +118,7 @@ add_executable(ds5-bridge
         src/bt.cpp
         src/button_functions.cpp
         src/usb_mode.cpp
+        src/usb_in_pacer.cpp
         src/xinput.cpp
         src/xinput_descriptors.cpp
         src/config.cpp

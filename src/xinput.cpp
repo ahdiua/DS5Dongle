@@ -3,9 +3,14 @@
 #include <cstring>
 
 #include "bt.h"
+#include "config.h"
 #include "device/usbd_pvt.h"
 #include "pico/critical_section.h"
+#include "pico/time.h"
 #include "tusb.h"
+#include "usb.h"
+#include "usb_descriptors.h"
+#include "usb_in_pacer.h"
 #include "usb_mode.h"
 #include "utils.h"
 
@@ -82,6 +87,12 @@ alignas(4) XInputReport control_input_report{
 uint8_t endpoint_in = 0;
 uint8_t endpoint_out = 0;
 uint8_t device_rhport = 0;
+
+// Fresh-only in every mode (a real wired Xbox 360 pad only reports changes).
+// Real-time arms on arrival; the fixed rates arm just before the host poll.
+UsbInPacer pacer;
+
+void send_pending_report();
 
 uint16_t map_dpad(uint8_t direction) {
     switch (direction) {
@@ -176,11 +187,13 @@ bool arm_out_endpoint() {
 void driver_init() {
     endpoint_in = 0;
     endpoint_out = 0;
+    pacer.reset();
 }
 
 bool driver_deinit() {
     endpoint_in = 0;
     endpoint_out = 0;
+    pacer.reset();
     return true;
 }
 
@@ -188,6 +201,7 @@ void driver_reset(uint8_t rhport) {
     device_rhport = rhport;
     endpoint_in = 0;
     endpoint_out = 0;
+    pacer.reset();
 }
 
 uint16_t driver_open(uint8_t rhport, tusb_desc_interface_t const *itf_desc,
@@ -232,6 +246,7 @@ uint16_t driver_open(uint8_t rhport, tusb_desc_interface_t const *itf_desc,
     }
 
     device_rhport = rhport;
+    pacer.reset();
     memset(out_buffer, 0, sizeof(out_buffer));
     arm_out_endpoint();
     return consumed;
@@ -294,7 +309,57 @@ bool driver_xfer(uint8_t rhport, uint8_t ep_addr, xfer_result_t result,
         memset(out_buffer, 0, sizeof(out_buffer));
         return arm_out_endpoint();
     }
-    return ep_addr == endpoint_in;
+    if (ep_addr != endpoint_in) return false;
+
+    // TinyUSB has already released the endpoint. Send input that arrived
+    // while it was busy, and let the completion anchor the poll phase.
+    if (result == XFER_RESULT_SUCCESS) {
+        pacer.on_complete(time_us_64());
+    } else {
+        critical_section_enter_blocking(&report_cs);
+        report_dirty = true; // the host never got it
+        critical_section_exit(&report_cs);
+        pacer.reset();
+    }
+    send_pending_report();
+    return true;
+}
+
+void send_pending_report() {
+    if (!usb_xinput_mode() || usb_reconfiguring || endpoint_in == 0 || !tud_ready()) {
+        pacer.reset();
+        return;
+    }
+    if (usbd_edpt_busy(device_rhport, endpoint_in)) return;
+
+    const bool real_time = get_config().polling_rate_mode == 3;
+    pacer.configure(real_time ? UsbInPacer::Policy::Immediate
+                              : UsbInPacer::Policy::JustInTime,
+                    polling_interval() * 1000u, false);
+
+    critical_section_enter_blocking(&report_cs);
+    const bool fresh = report_dirty;
+    critical_section_exit(&report_cs);
+    const uint64_t now = time_us_64();
+    if (!pacer.want_arm(now, fresh)) return;
+
+    if (!usbd_edpt_claim(device_rhport, endpoint_in)) return;
+    // TinyUSB/DCD owns this buffer until the asynchronous transfer completes.
+    // Keep it separate from latest_report, which Bluetooth input may update.
+    critical_section_enter_blocking(&report_cs);
+    tx_report = latest_report;
+    report_dirty = false;
+    critical_section_exit(&report_cs);
+    if (!endpoint_xfer(device_rhport, endpoint_in,
+                       reinterpret_cast<uint8_t *>(&tx_report),
+                       sizeof(tx_report))) {
+        critical_section_enter_blocking(&report_cs);
+        report_dirty = true;
+        critical_section_exit(&report_cs);
+        usbd_edpt_release(device_rhport, endpoint_in);
+        return;
+    }
+    pacer.on_armed(now);
 }
 
 const usbd_class_driver_t xinput_driver = {
@@ -349,34 +414,17 @@ void xinput_on_dualsense_report(const uint8_t *data, uint16_t len) {
     latest_report = report;
     report_dirty = true;
     critical_section_exit(&report_cs);
+    // Arm right away if the pacer allows it, instead of waiting for the rest
+    // of this main-loop pass to reach interrupt_loop().
+    send_pending_report();
 }
 
 void xinput_task() {
-    if (!usb_xinput_mode() || endpoint_in == 0 || !tud_mounted() ||
-        usbd_edpt_busy(device_rhport, endpoint_in)) {
-        return;
-    }
+    send_pending_report();
+}
 
-    critical_section_enter_blocking(&report_cs);
-    const bool should_send = report_dirty;
-    critical_section_exit(&report_cs);
-    if (!should_send) return;
-
-    if (!usbd_edpt_claim(device_rhport, endpoint_in)) return;
-    // TinyUSB/DCD owns this buffer until the asynchronous transfer completes.
-    // Keep it separate from latest_report, which Bluetooth input may update.
-    critical_section_enter_blocking(&report_cs);
-    tx_report = latest_report;
-    report_dirty = false;
-    critical_section_exit(&report_cs);
-    if (!endpoint_xfer(device_rhport, endpoint_in,
-                       reinterpret_cast<uint8_t *>(&tx_report),
-                       sizeof(tx_report))) {
-        critical_section_enter_blocking(&report_cs);
-        report_dirty = true;
-        critical_section_exit(&report_cs);
-        usbd_edpt_release(device_rhport, endpoint_in);
-    }
+UsbInPacer::Stats xinput_pacer_stats() {
+    return pacer.stats();
 }
 
 void xinput_reset_input() {

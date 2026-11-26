@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+#include "usb_in_pacer.h"
+
 // Feed a 63-byte DualSense USB-format input payload (the bytes after the
 // Bluetooth 0x31 header) into the Xbox 360 report mapper.
 void xinput_on_dualsense_report(const uint8_t *data, uint16_t len);
@@ -10,8 +12,12 @@ void xinput_on_dualsense_report(const uint8_t *data, uint16_t len);
 // Initialize synchronization for the mapped input report.
 void xinput_init();
 
-// Submit a mapped state only after fresh Bluetooth input arrives.
+// Main-loop hook: drives just-in-time deadlines and retries. Fresh input is
+// also armed directly from xinput_on_dualsense_report() and on IN completion.
 void xinput_task();
+
+// Input-report pacing counters, for debug logging.
+UsbInPacer::Stats xinput_pacer_stats();
 
 // Clear host-visible input state after a controller or mode disconnect.
 void xinput_reset_input();
